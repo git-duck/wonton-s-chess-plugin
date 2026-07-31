@@ -1,0 +1,21 @@
+name: ChessPlugin
+main: com.example.chess.ChessPlugin
+version: 1.0.0
+api-version: 1.20
+commands:
+  chess:
+    description: Send a chess challenge: /chess <player>
+    usage: /chess <player>
+    permission: chess.use
+  chessaccept:
+    description: Accept a chess challenge
+    usage: /chessaccept
+    permission: chess.use
+  chessdeny:
+    description: Deny a chess challenge
+    usage: /chessdeny
+    permission: chess.use
+permissions:
+  chess.use:
+    description: Allows using the chess commands
+    default: true
