@@ -13,10 +13,9 @@
   <description>Paper plugin: 8x8 chess GUI</description>
 
   <properties>
-    <maven.compiler.release>17</maven.compiler.release>
+    <maven.compiler.release>21</maven.compiler.release>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-    <!-- Match the Paper API version you target (adjust if necessary) -->
-    <paper.api.version>1.21.0-R0.1-SNAPSHOT</paper.api.version>
+    <paper.api.version>1.21-R0.1-SNAPSHOT</paper.api.version>
   </properties>
 
   <repositories>
@@ -27,7 +26,6 @@
   </repositories>
 
   <dependencies>
-    <!-- Paper API (provided scope so server provides it at runtime) -->
     <dependency>
       <groupId>io.papermc.paper</groupId>
       <artifactId>paper-api</artifactId>
@@ -38,7 +36,6 @@
 
   <build>
     <plugins>
-      <!-- Java compilation -->
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-compiler-plugin</artifactId>
@@ -47,9 +44,6 @@
           <release>${maven.compiler.release}</release>
         </configuration>
       </plugin>
-
-      <!-- Optional: build a plugin jar with no extra shading needed (server provides API) -->
-      <!-- If you do have third-party dependencies to include, add maven-shade-plugin here. -->
     </plugins>
   </build>
 </project>
