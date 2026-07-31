@@ -1,3 +1,5 @@
+package com.wonton.chess;
+
 import org.bukkit.Bukkit;
 import org.bukkit.ChatColor;
 import org.bukkit.Material;
@@ -33,8 +35,7 @@ import java.util.stream.Collectors;
  *
  * Notes:
  * - Promotion auto-queens.
- * - No castling in this compact engine.
- * - En passant and check/checkmate are supported.
+ * - Castling, en passant, and check/checkmate are supported.
  */
 public class ChessPlugin extends JavaPlugin implements Listener {
 
@@ -590,7 +591,7 @@ public class ChessPlugin extends JavaPlugin implements Listener {
                 if (iv == null) continue;
                 Inventory top = iv.getTopInventory();
                 if (top == null) continue;
-                if (top.getTitle() != null && top.getTitle().equals(ChatColor.DARK_GREEN + "Chess (8x8)")) {
+                if (iv.getTitle().equals(ChatColor.DARK_GREEN + "Chess (8x8)")) {
                     // re-apply top area and player's mapped slots
                     // top:
                     for (int guiRow = 0; guiRow < 4; guiRow++) {
@@ -663,7 +664,7 @@ public class ChessPlugin extends JavaPlugin implements Listener {
         }
     }
 
-    // ----------------- Chess engine simplified (en passant, check/checkmate) -----------------
+    // ----------------- Chess engine simplified (en passant, castling, check/checkmate) -----------------
     enum Color { WHITE, BLACK }
     enum ChessPieceType { PAWN, ROOK, KNIGHT, BISHOP, QUEEN, KING }
 
@@ -671,6 +672,7 @@ public class ChessPlugin extends JavaPlugin implements Listener {
         final Color color;
         final ChessPieceType type;
         int x, y;
+        boolean hasMoved = false;
         ChessPiece(Color color, ChessPieceType type, int x, int y) { this.color = color; this.type = type; this.x = x; this.y = y; }
         String toShortString() { return color.name().charAt(0) + "-" + type.name().charAt(0); }
     }
@@ -681,6 +683,7 @@ public class ChessPlugin extends JavaPlugin implements Listener {
         boolean isDoublePawn = false;
         boolean promotion = false;
         Color promotionColor = null;
+        boolean isCastling = false;
         ChessMove(int fx,int fy,int tx,int ty){fromX=fx;fromY=fy;toX=tx;toY=ty;}
     }
 
@@ -728,7 +731,20 @@ public class ChessPlugin extends JavaPlugin implements Listener {
             for (ChessMove m : moves) {
                 ChessBoard copy = copy();
                 copy.applyMove(m);
-                if (!copy.isKingInCheck(p.color)) legal.add(m);
+                if (!copy.isKingInCheck(p.color)) {
+                    // Check castling constraints
+                    if (m.isCastling) {
+                        if (isKingInCheck(p.color)) continue; // Cannot castle out of check
+                        
+                        // Check if the passing square is under attack
+                        int passY = m.fromY + (m.toY > m.fromY ? 1 : -1);
+                        ChessBoard passCopy = copy();
+                        // Simulate King moving just one square to check if it's attacked
+                        passCopy.applyMove(new ChessMove(m.fromX, m.fromY, m.fromX, passY));
+                        if (passCopy.isKingInCheck(p.color)) continue; // Cannot castle through check
+                    }
+                    legal.add(m);
+                }
             }
             return legal;
         }
@@ -802,6 +818,28 @@ public class ChessPlugin extends JavaPlugin implements Listener {
                         ChessPiece t = getPiece(tx,ty);
                         if (t==null || t.color!=p.color) out.add(new ChessMove(x,y,tx,ty));
                     }
+                    
+                    // Castling Logic
+                    if (!p.hasMoved) {
+                        // Kingside (short) -> check right rook at y = 7
+                        ChessPiece hRook = getPiece(x, 7);
+                        if (hRook != null && hRook.type == ChessPieceType.ROOK && !hRook.hasMoved) {
+                            if (getPiece(x, 5) == null && getPiece(x, 6) == null) {
+                                ChessMove m = new ChessMove(x, y, x, y + 2);
+                                m.isCastling = true;
+                                out.add(m);
+                            }
+                        }
+                        // Queenside (long) -> check left rook at y = 0
+                        ChessPiece aRook = getPiece(x, 0);
+                        if (aRook != null && aRook.type == ChessPieceType.ROOK && !aRook.hasMoved) {
+                            if (getPiece(x, 1) == null && getPiece(x, 2) == null && getPiece(x, 3) == null) {
+                                ChessMove m = new ChessMove(x, y, x, y - 2);
+                                m.isCastling = true;
+                                out.add(m);
+                            }
+                        }
+                    }
                     break;
             }
             return out;
@@ -831,6 +869,23 @@ public class ChessPlugin extends JavaPlugin implements Listener {
                 int capY = m.toY;
                 setPiece(capX, capY, null);
             }
+            
+            // Castling Execution
+            if (m.isCastling) {
+                if (m.toY > m.fromY) { // Kingside
+                    ChessPiece rook = getPiece(m.fromX, 7);
+                    setPiece(m.fromX, 5, rook); // Move rook next to king
+                    setPiece(m.fromX, 7, null);
+                    if (rook != null) rook.hasMoved = true;
+                } else { // Queenside
+                    ChessPiece rook = getPiece(m.fromX, 0);
+                    setPiece(m.fromX, 3, rook); // Move rook next to king
+                    setPiece(m.fromX, 0, null);
+                    if (rook != null) rook.hasMoved = true;
+                }
+            }
+            
+            p.hasMoved = true; // Mark piece as moved
             setPiece(m.toX,m.toY,p);
             setPiece(m.fromX,m.fromY,null);
         }
@@ -839,7 +894,10 @@ public class ChessPlugin extends JavaPlugin implements Listener {
             ChessBoard c = new ChessBoard();
             for (int x=0;x<8;x++) for (int y=0;y<8;y++) {
                 ChessPiece p = b[x][y];
-                if (p != null) c.b[x][y] = new ChessPiece(p.color, p.type, x, y);
+                if (p != null) {
+                    c.b[x][y] = new ChessPiece(p.color, p.type, x, y);
+                    c.b[x][y].hasMoved = p.hasMoved; // Preserve movement state
+                }
             }
             c.whiteToMove = whiteToMove;
             return c;
