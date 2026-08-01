@@ -4,9 +4,9 @@ A fully interactive 8x8 Chess engine built natively for Minecraft servers (Paper
 
 ## Authors & Credits
 
-* **[eeveesun](https://github.com)** — *Original Creator & System Architect*
+* **[eeveesun](https://github.com)** — *Original Creator*
   Up to this point ITS ALL ME. ALL ME.
-* **[MrFrenchGuy23](https://github.com)** — *Co-Developer & Engine Engineer*
+* **[MrFrenchGuy23](https://github.com)** — 
   He hasn't done anything yet, I just invited him.
 
 ## Core Features
