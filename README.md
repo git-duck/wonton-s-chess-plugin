@@ -4,6 +4,7 @@ A fully interactive 8x8 Chess engine built natively for Minecraft servers (Paper
 
 On a note of updating, I'll probably add 1 minute bullet, 3 minute blitz and 10 minute rapid. Elo system, I'll probably just use chess.com's formula.
 Also, this project is not affiliated with chess.com, i'm just using their math formula for elo.
+And also make it so that pawns don't auto promote to queens.
 
 ## Authors & Credits
 
