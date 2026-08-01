@@ -3,7 +3,7 @@
 A fully interactive 8x8 Chess engine built natively for Minecraft servers (Paper/Spigot/Bukkit). Instead of using external maps or blocks, games are played entirely inside a custom, split-screen User Interface combining a virtual chest with the player's own inventory.
 
 On a note of updating, I'll probably add 1 minute bullet, 3 minute blitz and 10 minute rapid. Elo system, I'll probably just use chess.com's formula.
-
+Also, this project is not affiliated with chess.com, i'm just using their math formula for elo.
 
 ## Authors & Credits
 
