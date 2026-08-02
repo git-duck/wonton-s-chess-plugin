@@ -15,7 +15,14 @@ commands:
     description: Deny a chess challenge
     usage: /chessdeny
     permission: chess.use
+  chesstoggle:
+    description: Toggles the chess plugin on or off
+    usage: /chesstoggle
+    permission: chess.admin
 permissions:
   chess.use:
     description: Allows using the chess commands
     default: true
+  chess.admin:
+    description: Allows toggling the chess plugin
+    default: op
