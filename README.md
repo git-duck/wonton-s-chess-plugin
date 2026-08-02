@@ -8,7 +8,7 @@ And also make it so that pawns don't auto promote to queens.
 
 ## Authors & Credits
 
-* **[eeveesun](https://github.com)** — *Original Creator*
+* **[wonton_stew](https://github.com)** — *Original Creator*
   Up to this point ITS ALL ME. ALL ME.
 * **[MrFrenchGuy23](https://github.com)** — 
   He hasn't done anything yet, I just invited him. Finally locked in, he's debugging some stuff.
