@@ -596,4 +596,27 @@ public class ChessPlugin extends JavaPlugin implements Listener {
             this.offhand = offhand;
         }
 
-        static SavedInventory
+        static SavedInventory save(Player p) {
+    // Clone inventory contents to avoid shared references
+    ItemStack[] contents = Arrays.stream(p.getInventory().getContents())
+            .map(it -> it == null ? null : it.clone())
+            .toArray(ItemStack[]::new);
+    ItemStack[] armor = Arrays.stream(p.getInventory().getArmorContents())
+            .map(it -> it == null ? null : it.clone())
+            .toArray(ItemStack[]::new);
+    ItemStack off = p.getInventory().getItemInOffHand();
+    off = (off == null ? null : off.clone());
+    return new SavedInventory(contents, armor, off);
+}
+
+void restore(Player p) {
+    PlayerInventory inv = p.getInventory();
+    inv.setContents(Arrays.copyOf(contents, contents.length));
+    inv.setArmorContents(Arrays.copyOf(armor, armor.length));
+    inv.setItemInOffHand(offhand == null ? null : offhand.clone());
+    // Ensure client sees the restored inventory
+    p.updateInventory();
+}
+} // end of SavedInventory
+
+} // end of ChessPlugin
