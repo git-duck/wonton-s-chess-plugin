@@ -12,6 +12,8 @@ And also make it so that pawns don't auto promote to queens.
   Up to this point ITS ALL ME. ALL ME.
 * **[MrFrenchGuy23](https://github.com)** — 
   He hasn't done anything yet, I just invited him. Finally locked in, he's debugging some stuff.
+  For eeveesun and git-duck (yes i know, im not git-duck im wonton_stew thats why they just all say wonton's [etc]) they just kinda threw some ideas around such as rapid and bullet, eeveesun attempted to modify AoPS's alcumus formula to apply here, but we ended up using MrFrenchGuy23's, but they are mainly working on other plugins we started.
+  If some of my comrades are here, and know about the 2018 or 2020 pact (i still cant remember the date) I had with eeveesun, this is kinda unrelated to those 2 guys they just tossed some ideas around when it was OG development, circa dec. 2025, MrFrenchGuy23 i met in December 2025, we started collaborating around April and only restarted this project a couple days ago.
 
 ## Core Features
 
