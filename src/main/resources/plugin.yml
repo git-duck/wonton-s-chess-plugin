@@ -15,6 +15,10 @@ commands:
     description: Deny a chess challenge
     usage: /chessdeny
     permission: chess.use
+  chessrating:
+    description: Show a player's chess ratings
+    usage: /chessrating [player]
+    permission: chess.use
   chesstoggle:
     description: Toggles the chess plugin on or off
     usage: /chesstoggle

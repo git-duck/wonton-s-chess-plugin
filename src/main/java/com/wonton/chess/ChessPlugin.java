@@ -15,10 +15,13 @@ import org.bukkit.event.inventory.*;
 import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.inventory.*;
 import org.bukkit.inventory.meta.ItemMeta;
+import org.bukkit.configuration.file.YamlConfiguration;
 import org.bukkit.persistence.PersistentDataType;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.bukkit.scheduler.BukkitTask;
 
+import java.io.File;
+import java.io.IOException;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
@@ -41,21 +44,27 @@ public class ChessPlugin extends JavaPlugin implements Listener {
 
     public static NamespacedKey PIECE_KEY;
     private ChallengeManager challengeManager;
+    private EloManager eloManager;
+    private boolean enabled = true;
     private final Map<UUID, ChessGame> activeGames = new ConcurrentHashMap<>();
 
     @Override
     public void onEnable() {
         PIECE_KEY = new NamespacedKey(this, "chess_piece");
         this.challengeManager = new ChallengeManager(this);
+        this.eloManager = new EloManager(this);
         getServer().getPluginManager().registerEvents(this, this);
         Objects.requireNonNull(this.getCommand("chess")).setExecutor(new ChessCommand());
         Objects.requireNonNull(this.getCommand("chessaccept")).setExecutor(new ChessAcceptCommand());
         Objects.requireNonNull(this.getCommand("chessdeny")).setExecutor(new ChessDenyCommand());
+        Objects.requireNonNull(this.getCommand("chessrating")).setExecutor(new ChessRatingCommand());
+        Objects.requireNonNull(this.getCommand("chesstoggle")).setExecutor(new ChessToggleCommand());
         getLogger().info("ChessPlugin enabled");
     }
 
     @Override
     public void onDisable() {
+        if (eloManager != null) eloManager.save();
         // End games (this closes inventories -> triggers restoration on close)
         for (ChessGame g : new ArrayList<>(activeGames.values())) {
             g.endGame("Server shutting down");
@@ -72,9 +81,26 @@ public class ChessPlugin extends JavaPlugin implements Listener {
                 return true;
             }
             Player p = (Player) sender;
-            if (args.length != 1) {
-                p.sendMessage(ChatColor.RED + "Usage: /chess <player>");
+            if (!enabled) {
+                p.sendMessage(ChatColor.RED + "Chess is currently disabled.");
                 return true;
+            }
+            if (args.length < 1 || args.length > 2) {
+                p.sendMessage(ChatColor.RED + "Usage: /chess <player> [1|3|5|10] (minutes)");
+                return true;
+            }
+            int minutes = 3; // default: blitz
+            if (args.length == 2) {
+                try {
+                    minutes = Integer.parseInt(args[1]);
+                } catch (NumberFormatException ex) {
+                    p.sendMessage(ChatColor.RED + "Invalid time control. Use 1 (bullet), 3 (blitz), 5 (blitz), or 10 (rapid).");
+                    return true;
+                }
+                if (minutes != 1 && minutes != 3 && minutes != 5 && minutes != 10) {
+                    p.sendMessage(ChatColor.RED + "Invalid time control. Use 1 (bullet), 3 (blitz), 5 (blitz), or 10 (rapid).");
+                    return true;
+                }
             }
             Player target = Bukkit.getPlayerExact(args[0]);
             if (target == null || !target.isOnline()) {
@@ -89,9 +115,9 @@ public class ChessPlugin extends JavaPlugin implements Listener {
                 p.sendMessage(ChatColor.RED + "Either you or the target is already in a game.");
                 return true;
             }
-            challengeManager.createChallenge(p, target);
-            p.sendMessage(ChatColor.GREEN + "Challenge sent to " + target.getName() + ". Expires in 30s.");
-            target.sendMessage(ChatColor.YELLOW + p.getName() + " has challenged you to a chess game! Type " + ChatColor.AQUA + "/chessaccept " + ChatColor.YELLOW + "to accept or " + ChatColor.RED + "/chessdeny" + ChatColor.YELLOW + " to deny.");
+            challengeManager.createChallenge(p, target, minutes);
+            p.sendMessage(ChatColor.GREEN + "Challenge sent to " + target.getName() + " (" + minutes + " min). Expires in 30s.");
+            target.sendMessage(ChatColor.YELLOW + p.getName() + " has challenged you to a " + minutes + "m chess game! Type " + ChatColor.AQUA + "/chessaccept " + ChatColor.YELLOW + "to accept or " + ChatColor.RED + "/chessdeny" + ChatColor.YELLOW + " to deny.");
             return true;
         }
 
@@ -103,6 +129,9 @@ public class ChessPlugin extends JavaPlugin implements Listener {
                         .map(Player::getName)
                         .filter(n -> n.toLowerCase().startsWith(prefix))
                         .collect(Collectors.toList());
+            }
+            if (args.length == 2) {
+                return Arrays.asList("1", "3", "5", "10");
             }
             return Collections.emptyList();
         }
@@ -116,17 +145,17 @@ public class ChessPlugin extends JavaPlugin implements Listener {
                 return true;
             }
             Player accepter = (Player) sender;
-            UUID challengerId = challengeManager.acceptChallenge(accepter);
-            if (challengerId == null) {
+            ChallengeManager.Challenge challenge = challengeManager.acceptChallenge(accepter);
+            if (challenge == null) {
                 accepter.sendMessage(ChatColor.RED + "You have no pending challenges.");
                 return true;
             }
-            Player challenger = Bukkit.getPlayer(challengerId);
+            Player challenger = Bukkit.getPlayer(challenge.challenger);
             if (challenger == null || !challenger.isOnline()) {
                 accepter.sendMessage(ChatColor.RED + "Challenger is no longer online.");
                 return true;
             }
-            ChessGame game = new ChessGame(ChessPlugin.this, challenger, accepter);
+            ChessGame game = new ChessGame(ChessPlugin.this, challenger, accepter, challenge.minutes);
             activeGames.put(challenger.getUniqueId(), game);
             activeGames.put(accepter.getUniqueId(), game);
             game.start();
@@ -135,6 +164,50 @@ public class ChessPlugin extends JavaPlugin implements Listener {
 
         @Override
         public List<String> onTabComplete(CommandSender sender, Command command, String alias, String[] args) {
+            return Collections.emptyList();
+        }
+    }
+
+    private class ChessRatingCommand implements TabExecutor {
+        @Override
+        public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
+            Player target;
+            if (args.length == 0) {
+                if (!(sender instanceof Player)) {
+                    sender.sendMessage("Players only. Usage: /chessrating <player>");
+                    return true;
+                }
+                target = (Player) sender;
+            } else if (args.length == 1) {
+                target = Bukkit.getPlayerExact(args[0]);
+                if (target == null || !target.isOnline()) {
+                    sender.sendMessage(ChatColor.RED + "Player not found or offline.");
+                    return true;
+                }
+            } else {
+                sender.sendMessage(ChatColor.RED + "Usage: /chessrating [player]");
+                return true;
+            }
+            sender.sendMessage(ChatColor.AQUA + target.getName() + "'s chess ratings:");
+            sender.sendMessage(ChatColor.GRAY + "Bullet (1m): " + ratingLine(target, "bullet"));
+            sender.sendMessage(ChatColor.GRAY + "Blitz (3-5m): " + ratingLine(target, "blitz"));
+            sender.sendMessage(ChatColor.GRAY + "Rapid (10m): " + ratingLine(target, "rapid"));
+            return true;
+        }
+
+        private String ratingLine(Player p, String category) {
+            return eloManager.getRating(p.getUniqueId(), category) + " (" + eloManager.getGames(p.getUniqueId(), category) + " games)";
+        }
+
+        @Override
+        public List<String> onTabComplete(CommandSender sender, Command command, String alias, String[] args) {
+            if (args.length == 1) {
+                String prefix = args[0].toLowerCase();
+                return Bukkit.getOnlinePlayers().stream()
+                        .map(Player::getName)
+                        .filter(n -> n.toLowerCase().startsWith(prefix))
+                        .collect(Collectors.toList());
+            }
             return Collections.emptyList();
         }
     }
@@ -157,6 +230,24 @@ public class ChessPlugin extends JavaPlugin implements Listener {
                 c.sendMessage(ChatColor.RED + denier.getName() + " denied your challenge.");
             }
             denier.sendMessage(ChatColor.YELLOW + "Challenge denied.");
+            return true;
+        }
+
+        @Override
+        public List<String> onTabComplete(CommandSender sender, Command command, String alias, String[] args) {
+            return Collections.emptyList();
+        }
+    }
+
+    private class ChessToggleCommand implements TabExecutor {
+        @Override
+        public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
+            if (!sender.hasPermission("chess.admin")) {
+                sender.sendMessage(ChatColor.RED + "You do not have permission to toggle the chess plugin.");
+                return true;
+            }
+            enabled = !enabled;
+            getServer().broadcastMessage(ChatColor.AQUA + "Chess is now " + (enabled ? "enabled" : "disabled") + ".");
             return true;
         }
 
@@ -229,14 +320,12 @@ public class ChessPlugin extends JavaPlugin implements Listener {
             }, 20L, 20L);
         }
 
-        void createChallenge(Player challenger, Player target) {
-            pending.put(target.getUniqueId(), new Challenge(challenger.getUniqueId(), System.currentTimeMillis() + 30_000L));
+        void createChallenge(Player challenger, Player target, int minutes) {
+            pending.put(target.getUniqueId(), new Challenge(challenger.getUniqueId(), System.currentTimeMillis() + 30_000L, minutes));
         }
 
-        UUID acceptChallenge(Player target) {
-            Challenge c = pending.remove(target.getUniqueId());
-            if (c == null) return null;
-            return c.challenger;
+        Challenge acceptChallenge(Player target) {
+            return pending.remove(target.getUniqueId());
         }
 
         UUID denyChallenge(Player target) {
@@ -248,34 +337,164 @@ public class ChessPlugin extends JavaPlugin implements Listener {
         static class Challenge {
             final UUID challenger;
             final long expiresAt;
-            Challenge(UUID challenger, long expiresAt) { this.challenger = challenger; this.expiresAt = expiresAt; }
+            final int minutes;
+            Challenge(UUID challenger, long expiresAt, int minutes) { this.challenger = challenger; this.expiresAt = expiresAt; this.minutes = minutes; }
+        }
+    }
+
+    // Elo ratings (chess.com formula), persisted to ratings.yml
+    static class EloManager {
+        private static final int DEFAULT_RATING = 1200;
+        private final JavaPlugin plugin;
+        private final Map<UUID, Map<String, Rating>> ratings = new ConcurrentHashMap<>();
+
+        EloManager(JavaPlugin plugin) {
+            this.plugin = plugin;
+            plugin.getDataFolder().mkdirs();
+            load();
+        }
+
+        int getRating(UUID id, String category) {
+            Map<String, Rating> m = ratings.get(id);
+            Rating r = m == null ? null : m.get(category);
+            return r == null ? DEFAULT_RATING : r.rating;
+        }
+
+        int getGames(UUID id, String category) {
+            Map<String, Rating> m = ratings.get(id);
+            Rating r = m == null ? null : m.get(category);
+            return r == null ? 0 : r.games;
+        }
+
+        // chess.com formula: newRating = old + K * (score - expected)
+        RatingChange[] applyResult(UUID a, UUID b, double scoreA, String category) {
+            int ra = getRating(a, category);
+            int rb = getRating(b, category);
+            double expectedA = 1.0 / (1.0 + Math.pow(10.0, (rb - ra) / 400.0));
+            double expectedB = 1.0 - expectedA;
+            double scoreB = 1.0 - scoreA;
+            int newRa = (int) Math.round(ra + kFactor(a, category) * (scoreA - expectedA));
+            int newRb = (int) Math.round(rb + kFactor(b, category) * (scoreB - expectedB));
+            setRating(a, category, newRa);
+            setRating(b, category, newRb);
+            save();
+            return new RatingChange[]{ new RatingChange(ra, newRa), new RatingChange(rb, newRb) };
+        }
+
+        // chess.com K-factors: 64 for new players (<30 games), 32 below 2400, 16 above
+        int kFactor(UUID id, String category) {
+            if (getGames(id, category) < 30) return 64;
+            if (getRating(id, category) < 2400) return 32;
+            return 16;
+        }
+
+        void setRating(UUID id, String category, int rating) {
+            Map<String, Rating> m = ratings.computeIfAbsent(id, k -> new HashMap<>());
+            Rating r = m.computeIfAbsent(category, k -> new Rating());
+            r.rating = rating;
+            r.games++;
+        }
+
+        void load() {
+            File f = new File(plugin.getDataFolder(), "ratings.yml");
+            if (!f.exists()) return;
+            YamlConfiguration cfg = YamlConfiguration.loadConfiguration(f);
+            for (String key : cfg.getKeys(false)) {
+                UUID id;
+                try {
+                    id = UUID.fromString(key);
+                } catch (IllegalArgumentException ex) {
+                    continue;
+                }
+                Map<String, Rating> m = new HashMap<>();
+                for (String cat : new String[]{"bullet", "blitz", "rapid"}) {
+                    Rating r = new Rating();
+                    r.rating = cfg.getInt(key + "." + cat + ".rating", DEFAULT_RATING);
+                    r.games = cfg.getInt(key + "." + cat + ".games", 0);
+                    m.put(cat, r);
+                }
+                ratings.put(id, m);
+            }
+        }
+
+        void save() {
+            YamlConfiguration cfg = new YamlConfiguration();
+            for (Map.Entry<UUID, Map<String, Rating>> en : ratings.entrySet()) {
+                String base = en.getKey().toString();
+                for (Map.Entry<String, Rating> e : en.getValue().entrySet()) {
+                    cfg.set(base + "." + e.getKey() + ".rating", e.getValue().rating);
+                    cfg.set(base + "." + e.getKey() + ".games", e.getValue().games);
+                }
+            }
+            try {
+                cfg.save(new File(plugin.getDataFolder(), "ratings.yml"));
+            } catch (IOException ex) {
+                plugin.getLogger().warning("Could not save ratings: " + ex.getMessage());
+            }
+        }
+
+        static class Rating {
+            int rating = DEFAULT_RATING;
+            int games = 0;
+        }
+
+        static class RatingChange {
+            final int oldRating, newRating, delta;
+            RatingChange(int oldRating, int newRating) {
+                this.oldRating = oldRating;
+                this.newRating = newRating;
+                this.delta = newRating - oldRating;
+            }
         }
     }
 
     // Chess game (engine + combined inventory GUI) ----------------------------
 
     static class ChessGame {
+        enum GameResult { WHITE_WIN, BLACK_WIN, DRAW, ABANDONED }
+
         final ChessPlugin plugin;
         final Player white;
         final Player black;
         final ChessBoard board;
+        final int minutes;
+        final String title;
         UUID selectedPlayer = null;
         int selectedX = -1, selectedY = -1;
         // track whether player's inventory has been replaced (so we know to restore)
         final Map<UUID, SavedInventory> saved = new HashMap<>();
         // timers
-        int whiteTime = 5 * 60;
-        int blackTime = 5 * 60;
+        int whiteTime;
+        int blackTime;
         BukkitTask timerTask;
         boolean running = false;
         // en passant: last double pawn end coordinate or null
         int[] lastDoublePawn = null;
+        // pending pawn promotion (move awaiting piece choice)
+        ChessMove pendingPromotion = null;
+        UUID promotionPlayer = null;
 
-        ChessGame(ChessPlugin plugin, Player white, Player black) {
+        ChessGame(ChessPlugin plugin, Player white, Player black, int minutes) {
             this.plugin = plugin;
             this.white = white;
             this.black = black;
             this.board = new ChessBoard();
+            this.minutes = minutes;
+            this.whiteTime = minutes * 60;
+            this.blackTime = minutes * 60;
+            this.title = ChatColor.DARK_GREEN + "Chess (" + minutes + "m " + timeControlName().toLowerCase() + ")";
+        }
+
+        String timeControlName() {
+            if (minutes <= 1) return "Bullet";
+            if (minutes <= 5) return "Blitz";
+            return "Rapid";
+        }
+
+        static String categoryFor(int minutes) {
+            if (minutes <= 1) return "bullet";
+            if (minutes <= 5) return "blitz";
+            return "rapid";
         }
 
         void start() {
@@ -284,7 +503,9 @@ public class ChessPlugin extends JavaPlugin implements Listener {
             openFor(white);
             openFor(black);
             timerTask = plugin.getServer().getScheduler().runTaskTimer(plugin, this::tick, 20L, 20L);
-            sendBoth(ChatColor.GREEN + "Game started! White to move. 5-minute blitz.");
+            String cat = categoryFor(minutes);
+            sendBoth(ChatColor.GREEN + "Game started! " + timeControlName() + " (" + minutes + "m). White to move.");
+            sendBoth(ChatColor.GRAY + "White " + white.getName() + " [" + plugin.eloManager.getRating(white.getUniqueId(), cat) + "] vs Black " + black.getName() + " [" + plugin.eloManager.getRating(black.getUniqueId(), cat) + "]");
             updateAllInventories();
         }
 
@@ -292,19 +513,28 @@ public class ChessPlugin extends JavaPlugin implements Listener {
             if (!running) return;
             if (board.whiteToMove) {
                 whiteTime--;
-                if (whiteTime <= 0) endGame("Black wins on time");
+                if (whiteTime <= 0) endGame("Black wins on time", GameResult.BLACK_WIN);
             } else {
                 blackTime--;
-                if (blackTime <= 0) endGame("White wins on time");
+                if (blackTime <= 0) endGame("White wins on time", GameResult.WHITE_WIN);
             }
             updateAllInventories();
         }
 
         void endGame(String reason) {
+            endGame(reason, GameResult.ABANDONED);
+        }
+
+        void endGame(String reason, GameResult result) {
             if (!running) return;
             running = false;
             if (timerTask != null) timerTask.cancel();
+            pendingPromotion = null;
+            promotionPlayer = null;
             sendBoth(ChatColor.YELLOW + "Game ended: " + reason);
+            if (result != GameResult.ABANDONED) {
+                applyElo(result);
+            }
             // close GUIs (will trigger onClose -> restore)
             for (Player p : Arrays.asList(white, black)) {
                 if (p.isOnline()) p.closeInventory();
@@ -318,13 +548,44 @@ public class ChessPlugin extends JavaPlugin implements Listener {
             plugin.removeGame(this);
         }
 
+        void applyElo(GameResult result) {
+            String cat = categoryFor(minutes);
+            if (result == GameResult.DRAW) {
+                EloManager.RatingChange[] ch = plugin.eloManager.applyResult(white.getUniqueId(), black.getUniqueId(), 0.5, cat);
+                sendRatingChange(white, ch[0]);
+                sendRatingChange(black, ch[1]);
+            } else if (result == GameResult.WHITE_WIN) {
+                EloManager.RatingChange[] ch = plugin.eloManager.applyResult(white.getUniqueId(), black.getUniqueId(), 1.0, cat);
+                sendRatingChange(white, ch[0]);
+                sendRatingChange(black, ch[1]);
+            } else if (result == GameResult.BLACK_WIN) {
+                EloManager.RatingChange[] ch = plugin.eloManager.applyResult(black.getUniqueId(), white.getUniqueId(), 1.0, cat);
+                sendRatingChange(black, ch[0]);
+                sendRatingChange(white, ch[1]);
+            }
+        }
+
+        void sendRatingChange(Player p, EloManager.RatingChange c) {
+            if (p == null || !p.isOnline() || c == null) return;
+            String sign = c.delta >= 0 ? "+" : "";
+            p.sendMessage(ChatColor.GRAY + "Rating (" + timeControlName().toLowerCase() + "): " + c.oldRating + " -> " + c.newRating + " (" + sign + c.delta + ")");
+        }
+
         void onPlayerQuit(Player p) {
             if (!running) return;
-            Player other = (p.getUniqueId().equals(white.getUniqueId())) ? black : white;
-            endGame(other.getName() + " wins (opponent disconnected)");
+            if (p.getUniqueId().equals(white.getUniqueId())) {
+                endGame(black.getName() + " wins (opponent disconnected)", GameResult.BLACK_WIN);
+            } else {
+                endGame(white.getName() + " wins (opponent disconnected)", GameResult.WHITE_WIN);
+            }
         }
 
         void onClose(Player p) {
+            // discard any pending promotion if the promoting player leaves the view
+            if (pendingPromotion != null && promotionPlayer != null && promotionPlayer.equals(p.getUniqueId())) {
+                pendingPromotion = null;
+                promotionPlayer = null;
+            }
             // restore player's inventory when they close the board; game continues
             SavedInventory s = saved.remove(p.getUniqueId());
             if (s != null) {
@@ -346,7 +607,7 @@ public class ChessPlugin extends JavaPlugin implements Listener {
                 saved.put(p.getUniqueId(), SavedInventory.save(p));
             }
             // Build top inventory (54)
-            Inventory inv = Bukkit.createInventory(null, 54, ChatColor.DARK_GREEN + "Chess (8x8)");
+            Inventory inv = Bukkit.createInventory(null, 54, title);
             // fill top 4 ranks into chest top:
             // top area: guiRow 0..3, col 0..7 -> boardRow = guiRow, boardCol = col
             for (int guiRow = 0; guiRow < 4; guiRow++) {
@@ -361,7 +622,7 @@ public class ChessPlugin extends JavaPlugin implements Listener {
                 if (guiRow == 0) text = ChatColor.AQUA + "White: " + formatTime(whiteTime);
                 else if (guiRow == 1) text = ChatColor.AQUA + "Black: " + formatTime(blackTime);
                 else if (guiRow == 2) text = ChatColor.YELLOW + "Turn: " + (board.whiteToMove ? "White" : "Black");
-                else text = ChatColor.GRAY + "8x8 Board";
+                else text = ChatColor.GRAY + "" + minutes + "m " + timeControlName();
                 ItemStack info = new ItemStack(Material.PAPER);
                 ItemMeta meta = info.getItemMeta();
                 meta.setDisplayName(text);
@@ -448,6 +709,11 @@ public class ChessPlugin extends JavaPlugin implements Listener {
         // Handle clicks in combined view
         void onInventoryClick(Player p, InventoryClickEvent e) {
             if (!running) return;
+            // while a promotion is pending for this player, all their clicks go to the promotion picker
+            if (pendingPromotion != null && promotionPlayer != null && promotionPlayer.equals(p.getUniqueId())) {
+                handlePromotionClick(p, e);
+                return;
+            }
             // Identify rawSlot and whether it's a top chest board square or player inventory board square
             int raw = e.getRawSlot();
             // First handle chest control buttons (they are in top chest area)
@@ -473,7 +739,8 @@ public class ChessPlugin extends JavaPlugin implements Listener {
                             openFor(p);
                             return;
                         case "Resign":
-                            endGame((p.getName()) + " resigned. " + ((p.getUniqueId().equals(white.getUniqueId())) ? black.getName() : white.getName()) + " wins.");
+                            endGame(p.getName() + " resigned. " + (p.getUniqueId().equals(white.getUniqueId()) ? black.getName() : white.getName()) + " wins.",
+                                    p.getUniqueId().equals(white.getUniqueId()) ? GameResult.BLACK_WIN : GameResult.WHITE_WIN);
                             return;
                         case "Time":
                             p.sendMessage(ChatColor.AQUA + "White: " + formatTime(whiteTime) + " | Black: " + formatTime(blackTime));
@@ -577,25 +844,81 @@ public class ChessPlugin extends JavaPlugin implements Listener {
                     return;
                 }
                 ChessMove move = chosen.get();
-                // en passant handling: ChessBoard.applyMove will remove captured pawn if needed
-                if (move.isDoublePawn) lastDoublePawn = new int[]{move.toX, move.toY};
-                else lastDoublePawn = null;
-                board.applyMove(move);
-                // promotion to queen if needed
                 if (move.promotion) {
-                    board.setPiece(move.toX, move.toY, new ChessPiece(move.promotionColor, ChessPieceType.QUEEN, move.toX, move.toY));
-                }
-                board.whiteToMove = !board.whiteToMove;
-                selectedPlayer = null; selectedX = -1; selectedY = -1;
-                updateAllInventories();
-                if (board.isInCheckmate(board.whiteToMove, lastDoublePawn)) {
-                    endGame((board.whiteToMove ? "White" : "Black") + " is checkmated. " + (board.whiteToMove ? black.getName() : white.getName()) + " wins.");
+                    // pause: ask the player which piece to promote to
+                    selectedPlayer = null; selectedX = -1; selectedY = -1;
+                    pendingPromotion = move;
+                    promotionPlayer = player.getUniqueId();
+                    showPromotionChoices(player);
                     return;
                 }
-                if (board.isStalemate(board.whiteToMove, lastDoublePawn)) {
-                    endGame("Draw by stalemate.");
-                    return;
-                }
+                completeMove(move, null);
+            }
+        }
+
+        // Promotion picker -----------------------------------------------------
+
+        void handlePromotionClick(Player p, InventoryClickEvent e) {
+            int raw = e.getRawSlot();
+            if (raw < 0 || raw >= 54) return; // choices live in the top chest
+            switch (raw) {
+                case 0: finishPromotion(p, ChessPieceType.QUEEN); break;
+                case 1: finishPromotion(p, ChessPieceType.ROOK); break;
+                case 2: finishPromotion(p, ChessPieceType.BISHOP); break;
+                case 3: finishPromotion(p, ChessPieceType.KNIGHT); break;
+                case 4: cancelPromotion(p); break;
+                default: break;
+            }
+        }
+
+        void showPromotionChoices(Player p) {
+            InventoryView view = p.getOpenInventory();
+            if (view == null) return;
+            Inventory top = view.getTopInventory();
+            if (top == null) return;
+            Color c = pendingPromotion.promotionColor;
+            top.setItem(0, toItemFor(new ChessPiece(c, ChessPieceType.QUEEN, 0, 0)));
+            top.setItem(1, toItemFor(new ChessPiece(c, ChessPieceType.ROOK, 0, 0)));
+            top.setItem(2, toItemFor(new ChessPiece(c, ChessPieceType.BISHOP, 0, 0)));
+            top.setItem(3, toItemFor(new ChessPiece(c, ChessPieceType.KNIGHT, 0, 0)));
+            top.setItem(4, createButton(Material.BARRIER, ChatColor.RED + "Cancel"));
+            p.sendMessage(ChatColor.YELLOW + "Promote your pawn! Click Queen, Rook, Bishop, or Knight in the top-left of the board.");
+        }
+
+        void cancelPromotion(Player p) {
+            pendingPromotion = null;
+            promotionPlayer = null;
+            updateAllInventories();
+            p.sendMessage(ChatColor.GRAY + "Promotion cancelled.");
+        }
+
+        void finishPromotion(Player p, ChessPieceType type) {
+            ChessMove move = pendingPromotion;
+            if (move == null) return;
+            pendingPromotion = null;
+            promotionPlayer = null;
+            completeMove(move, type);
+        }
+
+        void completeMove(ChessMove move, ChessPieceType promotionTo) {
+            if (move.isDoublePawn) lastDoublePawn = new int[]{move.toX, move.toY};
+            else lastDoublePawn = null;
+            board.applyMove(move);
+            if (promotionTo != null) {
+                board.setPiece(move.toX, move.toY, new ChessPiece(move.promotionColor, promotionTo, move.toX, move.toY));
+            }
+            board.whiteToMove = !board.whiteToMove;
+            selectedPlayer = null; selectedX = -1; selectedY = -1;
+            updateAllInventories();
+            if (board.isInCheckmate(board.whiteToMove, lastDoublePawn)) {
+                Color winner = board.whiteToMove ? Color.BLACK : Color.WHITE;
+                endGame((board.whiteToMove ? "White" : "Black") + " is checkmated. " + (board.whiteToMove ? black.getName() : white.getName()) + " wins.",
+                        winner == Color.WHITE ? GameResult.WHITE_WIN : GameResult.BLACK_WIN);
+                return;
+            }
+            if (board.isStalemate(board.whiteToMove, lastDoublePawn)) {
+                endGame("Draw by stalemate.", GameResult.DRAW);
+                return;
             }
         }
 
@@ -609,11 +932,13 @@ public class ChessPlugin extends JavaPlugin implements Listener {
             // Refresh both players: update chest top and their player-inventory mapped slots
             for (Player p : Arrays.asList(white, black)) {
                 if (!p.isOnline()) continue;
+                // while this player is choosing a promotion piece, keep the picker visible
+                if (pendingPromotion != null && promotionPlayer != null && promotionPlayer.equals(p.getUniqueId())) continue;
                 InventoryView iv = p.getOpenInventory();
                 if (iv == null) continue;
                 Inventory top = iv.getTopInventory();
                 if (top == null) continue;
-                if (iv.getTitle().equals(ChatColor.DARK_GREEN + "Chess (8x8)")) {
+                if (iv.getTitle().equals(title)) {
                     // re-apply top area and player's mapped slots
                     // top:
                     for (int guiRow = 0; guiRow < 4; guiRow++) {
@@ -631,7 +956,7 @@ public class ChessPlugin extends JavaPlugin implements Listener {
                             if (guiRow == 0) text = ChatColor.AQUA + "White: " + formatTime(whiteTime);
                             else if (guiRow == 1) text = ChatColor.AQUA + "Black: " + formatTime(blackTime);
                             else if (guiRow == 2) text = ChatColor.YELLOW + "Turn: " + (board.whiteToMove ? "White" : "Black");
-                            else text = ChatColor.GRAY + "8x8 Board";
+                            else text = ChatColor.GRAY + "" + minutes + "m " + timeControlName();
                             meta.setDisplayName(text);
                             info.setItemMeta(meta);
                             top.setItem(ctrlSlot, info);
