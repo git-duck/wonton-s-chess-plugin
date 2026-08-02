@@ -19,6 +19,8 @@ import org.bukkit.persistence.PersistentDataType;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.bukkit.scheduler.BukkitTask;
 
+import java.io.File;
+import java.nio.file.Files;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
@@ -36,6 +38,7 @@ import java.util.stream.Collectors;
  * Notes:
  * - Promotion auto-queens.
  * - Castling, en passant, and check/checkmate are supported.
+ * - Includes status.txt kill switch.
  */
 public class ChessPlugin extends JavaPlugin implements Listener {
 
@@ -45,6 +48,30 @@ public class ChessPlugin extends JavaPlugin implements Listener {
 
     @Override
     public void onEnable() {
+        // Kill Switch Check
+        if (!getDataFolder().exists()) {
+            getDataFolder().mkdirs();
+        }
+        File statusFile = new File(getDataFolder(), "status.txt");
+        if (!statusFile.exists()) {
+            try {
+                Files.writeString(statusFile.toPath(), "true");
+            } catch (Exception e) {
+                getLogger().warning("Could not create status.txt");
+            }
+        } else {
+            try {
+                String content = Files.readString(statusFile.toPath()).trim();
+                if (content.equalsIgnoreCase("false")) {
+                    getLogger().warning("status.txt is set to false! Disabling ChessPlugin...");
+                    getServer().getPluginManager().disablePlugin(this);
+                    return;
+                }
+            } catch (Exception e) {
+                getLogger().warning("Could not read status.txt");
+            }
+        }
+
         PIECE_KEY = new NamespacedKey(this, "chess_piece");
         this.challengeManager = new ChallengeManager(this);
         getServer().getPluginManager().registerEvents(this, this);
@@ -569,292 +596,4 @@ public class ChessPlugin extends JavaPlugin implements Listener {
             this.offhand = offhand;
         }
 
-        static SavedInventory save(Player p) {
-            PlayerInventory inv = p.getInventory();
-            ItemStack[] contentsCopy = Arrays.stream(inv.getContents())
-                    .map(item -> item == null ? null : item.clone())
-                    .toArray(ItemStack[]::new);
-            ItemStack[] armorCopy = Arrays.stream(inv.getArmorContents())
-                    .map(item -> item == null ? null : item.clone())
-                    .toArray(ItemStack[]::new);
-            ItemStack off = inv.getItemInOffHand() == null ? null : inv.getItemInOffHand().clone();
-            return new SavedInventory(contentsCopy, armorCopy, off);
-        }
-
-        void restore(Player p) {
-            PlayerInventory inv = p.getInventory();
-            inv.setContents(Arrays.stream(contents).map(item -> item == null ? null : item.clone()).toArray(ItemStack[]::new));
-            inv.setArmorContents(Arrays.stream(armor).map(item -> item == null ? null : item.clone()).toArray(ItemStack[]::new));
-            inv.setItemInOffHand(offhand == null ? null : offhand.clone());
-        }
-    }
-
-    enum Color { WHITE, BLACK }
-    enum ChessPieceType { PAWN, ROOK, KNIGHT, BISHOP, QUEEN, KING }
-
-    static class ChessPiece {
-        final Color color;
-        final ChessPieceType type;
-        int x, y;
-        boolean hasMoved = false;
-        ChessPiece(Color color, ChessPieceType type, int x, int y) { this.color = color; this.type = type; this.x = x; this.y = y; }
-        String toShortString() { return color.name().charAt(0) + "-" + type.name().charAt(0); }
-    }
-
-    static class ChessMove {
-        int fromX, fromY, toX, toY;
-        ChessPieceType promotionTo = null;
-        boolean isDoublePawn = false;
-        boolean promotion = false;
-        Color promotionColor = null;
-        boolean isCastling = false;
-        ChessMove(int fx,int fy,int tx,int ty){fromX=fx;fromY=fy;toX=tx;toY=ty;}
-    }
-
-    static class ChessBoard {
-        private final ChessPiece[][] b = new ChessPiece[8][8];
-        boolean whiteToMove = true;
-
-        ChessPiece getPiece(int x, int y) {
-            if (x<0||x>7||y<0||y>7) return null;
-            return b[x][y];
-        }
-        void setPiece(int x, int y, ChessPiece p) {
-            if (x<0||x>7||y<0||y>7) return;
-            b[x][y] = p;
-            if (p!=null){p.x=x;p.y=y;}
-        }
-        void resetInitialPosition() {
-            for (int x=0;x<8;x++) for (int y=0;y<8;y++) b[x][y]=null;
-            for (int y=0;y<8;y++) setPiece(1,y,new ChessPiece(Color.WHITE, ChessPieceType.PAWN,1,y));
-            for (int y=0;y<8;y++) setPiece(6,y,new ChessPiece(Color.BLACK, ChessPieceType.PAWN,6,y));
-            setPiece(0,0,new ChessPiece(Color.WHITE,ChessPieceType.ROOK,0,0));
-            setPiece(0,7,new ChessPiece(Color.WHITE,ChessPieceType.ROOK,0,7));
-            setPiece(7,0,new ChessPiece(Color.BLACK,ChessPieceType.ROOK,7,0));
-            setPiece(7,7,new ChessPiece(Color.BLACK,ChessPieceType.ROOK,7,7));
-            setPiece(0,1,new ChessPiece(Color.WHITE,ChessPieceType.KNIGHT,0,1));
-            setPiece(0,6,new ChessPiece(Color.WHITE,ChessPieceType.KNIGHT,0,6));
-            setPiece(7,1,new ChessPiece(Color.BLACK,ChessPieceType.KNIGHT,7,1));
-            setPiece(7,6,new ChessPiece(Color.BLACK,ChessPieceType.KNIGHT,7,6));
-            setPiece(0,2,new ChessPiece(Color.WHITE,ChessPieceType.BISHOP,0,2));
-            setPiece(0,5,new ChessPiece(Color.WHITE,ChessPieceType.BISHOP,0,5));
-            setPiece(7,2,new ChessPiece(Color.BLACK,ChessPieceType.BISHOP,7,2));
-            setPiece(7,5,new ChessPiece(Color.BLACK,ChessPieceType.BISHOP,7,5));
-            setPiece(0,3,new ChessPiece(Color.WHITE,ChessPieceType.QUEEN,0,3));
-            setPiece(7,3,new ChessPiece(Color.BLACK,ChessPieceType.QUEEN,7,3));
-            setPiece(0,4,new ChessPiece(Color.WHITE,ChessPieceType.KING,0,4));
-            setPiece(7,4,new ChessPiece(Color.BLACK,ChessPieceType.KING,7,4));
-            whiteToMove = true;
-        }
-
-        List<ChessMove> legalMoves(int x, int y, int[] lastDoublePawn) {
-            ChessPiece p = getPiece(x,y);
-            if (p == null) return Collections.emptyList();
-            List<ChessMove> moves = pseudoLegalMoves(x,y,lastDoublePawn);
-            List<ChessMove> legal = new ArrayList<>();
-            for (ChessMove m : moves) {
-                ChessBoard copy = copy();
-                copy.applyMove(m);
-                if (!copy.isKingInCheck(p.color)) {
-                    if (m.isCastling) {
-                        if (isKingInCheck(p.color)) continue;
-                        int passY = m.fromY + (m.toY > m.fromY ? 1 : -1);
-                        ChessBoard passCopy = copy();
-                        passCopy.applyMove(new ChessMove(m.fromX, m.fromY, m.fromX, passY));
-                        if (passCopy.isKingInCheck(p.color)) continue;
-                    }
-                    legal.add(m);
-                }
-            }
-            return legal;
-        }
-
-        List<ChessMove> pseudoLegalMoves(int x, int y, int[] lastDoublePawn) {
-            ChessPiece p = getPiece(x,y);
-            if (p == null) return Collections.emptyList();
-            List<ChessMove> out = new ArrayList<>();
-            int dir = (p.color == Color.WHITE) ? 1 : -1;
-            switch (p.type) {
-                case PAWN:
-                    int nx = x + dir;
-                    if (onBoard(nx,y) && getPiece(nx,y)==null) {
-                        ChessMove m = new ChessMove(x,y,nx,y);
-                        if (nx==7 || nx==0) { m.promotion = true; m.promotionColor = p.color; m.promotionTo = ChessPieceType.QUEEN; }
-                        out.add(m);
-                        if ((p.color==Color.WHITE && x==1) || (p.color==Color.BLACK && x==6)) {
-                            int nx2 = x + 2*dir;
-                            if (onBoard(nx2,y) && getPiece(nx2,y)==null) {
-                                ChessMove m2 = new ChessMove(x,y,nx2,y); m2.isDoublePawn = true;
-                                out.add(m2);
-                            }
-                        }
-                    }
-                    for (int dy : new int[]{-1,1}) {
-                        int cx = x + dir, cy = y + dy;
-                        if (onBoard(cx,cy)) {
-                            ChessPiece targ = getPiece(cx,cy);
-                            if (targ != null && targ.color != p.color) {
-                                ChessMove m = new ChessMove(x,y,cx,cy);
-                                if (cx==7 || cx==0) { m.promotion=true; m.promotionTo=ChessPieceType.QUEEN; m.promotionColor=p.color;}
-                                out.add(m);
-                            }
-                        }
-                    }
-                    if (lastDoublePawn != null) {
-                        int ldX = lastDoublePawn[0], ldY = lastDoublePawn[1];
-                        if (x == (p.color==Color.WHITE ? 4 : 3)) {
-                            if (Math.abs(ldY - y) == 1 && ldX == x) {
-                                int capToX = x + dir;
-                                int capToY = ldY;
-                                ChessMove m = new ChessMove(x,y,capToX,capToY);
-                                out.add(m);
-                            }
-                        }
-                    }
-                    break;
-                case KNIGHT:
-                    int[][] ksteps = {{1,2},{2,1},{-1,2},{-2,1},{1,-2},{2,-1},{-1,-2},{-2,-1}};
-                    for (int[] s: ksteps) {
-                        int tx=x+s[0], ty=y+s[1];
-                        if (!onBoard(tx,ty)) continue;
-                        ChessPiece t = getPiece(tx,ty);
-                        if (t==null || t.color!=p.color) out.add(new ChessMove(x,y,tx,ty));
-                    }
-                    break;
-                case BISHOP:
-                    addSlidingMoves(out,x,y,p,new int[][]{{1,1},{1,-1},{-1,1},{-1,-1}});
-                    break;
-                case ROOK:
-                    addSlidingMoves(out,x,y,p,new int[][]{{1,0},{-1,0},{0,1},{0,-1}});
-                    break;
-                case QUEEN:
-                    addSlidingMoves(out,x,y,p,new int[][]{{1,1},{1,-1},{-1,1},{-1,-1},{1,0},{-1,0},{0,1},{0,-1}});
-                    break;
-                case KING:
-                    for (int dx=-1;dx<=1;dx++) for (int dy=-1;dy<=1;dy++){
-                        if (dx==0&&dy==0) continue;
-                        int tx=x+dx, ty=y+dy;
-                        if (!onBoard(tx,ty)) continue;
-                        ChessPiece t = getPiece(tx,ty);
-                        if (t==null || t.color!=p.color) out.add(new ChessMove(x,y,tx,ty));
-                    }
-                    if (!p.hasMoved) {
-                        ChessPiece hRook = getPiece(x, 7);
-                        if (hRook != null && hRook.type == ChessPieceType.ROOK && !hRook.hasMoved) {
-                            if (getPiece(x, 5) == null && getPiece(x, 6) == null) {
-                                ChessMove m = new ChessMove(x, y, x, y + 2);
-                                m.isCastling = true;
-                                out.add(m);
-                            }
-                        }
-                        ChessPiece aRook = getPiece(x, 0);
-                        if (aRook != null && aRook.type == ChessPieceType.ROOK && !aRook.hasMoved) {
-                            if (getPiece(x, 1) == null && getPiece(x, 2) == null && getPiece(x, 3) == null) {
-                                ChessMove m = new ChessMove(x, y, x, y - 2);
-                                m.isCastling = true;
-                                out.add(m);
-                            }
-                        }
-                    }
-                    break;
-            }
-            return out;
-        }
-
-        private void addSlidingMoves(List<ChessMove> out, int x, int y, ChessPiece p, int[][] dirs) {
-            for (int[] d : dirs) {
-                int tx = x + d[0], ty = y + d[1];
-                while (onBoard(tx,ty)) {
-                    ChessPiece t = getPiece(tx,ty);
-                    if (t == null) out.add(new ChessMove(x,y,tx,ty));
-                    else { if (t.color != p.color) out.add(new ChessMove(x,y,tx,ty)); break; }
-                    tx += d[0]; ty += d[1];
-                }
-            }
-        }
-
-        boolean onBoard(int x,int y){return x>=0&&x<8&&y>=0&&y<8;}
-
-        void applyMove(ChessMove m) {
-            ChessPiece p = getPiece(m.fromX,m.fromY);
-            if (p==null) return;
-            if (p.type == ChessPieceType.PAWN && Math.abs(m.toY - m.fromY) == 1 && getPiece(m.toX, m.toY) == null && m.toX != m.fromX) {
-                int capX = m.fromX;
-                int capY = m.toY;
-                setPiece(capX, capY, null);
-            }
-            if (m.isCastling) {
-                if (m.toY > m.fromY) {
-                    ChessPiece rook = getPiece(m.fromX, 7);
-                    setPiece(m.fromX, 5, rook);
-                    setPiece(m.fromX, 7, null);
-                    if (rook != null) rook.hasMoved = true;
-                } else {
-                    ChessPiece rook = getPiece(m.fromX, 0);
-                    setPiece(m.fromX, 3, rook);
-                    setPiece(m.fromX, 0, null);
-                    if (rook != null) rook.hasMoved = true;
-                }
-            }
-            p.hasMoved = true;
-            setPiece(m.toX,m.toY,p);
-            setPiece(m.fromX,m.fromY,null);
-        }
-
-        ChessBoard copy() {
-            ChessBoard c = new ChessBoard();
-            for (int x=0;x<8;x++) for (int y=0;y<8;y++) {
-                ChessPiece p = b[x][y];
-                if (p != null) {
-                    c.b[x][y] = new ChessPiece(p.color, p.type, x, y);
-                    c.b[x][y].hasMoved = p.hasMoved;
-                }
-            }
-            c.whiteToMove = whiteToMove;
-            return c;
-        }
-
-        boolean isKingInCheck(Color kingColor) {
-            int kx=-1, ky=-1;
-            for (int x=0;x<8;x++) for (int y=0;y<8;y++) {
-                ChessPiece p = getPiece(x,y);
-                if (p != null && p.type==ChessPieceType.KING && p.color==kingColor) { kx=x; ky=y; }
-            }
-            if (kx==-1) return true;
-            Color enemy = kingColor == Color.WHITE ? Color.BLACK : Color.WHITE;
-            for (int x=0;x<8;x++) for (int y=0;y<8;y++) {
-                ChessPiece p = getPiece(x,y);
-                if (p != null && p.color == enemy) {
-                    for (ChessMove m : pseudoLegalMoves(x,y, null)) {
-                        if (m.toX == kx && m.toY == ky) return true;
-                    }
-                }
-            }
-            return false;
-        }
-
-        boolean isInCheckmate(boolean whiteToMoveSide) {
-            Color c = whiteToMoveSide ? Color.WHITE : Color.BLACK;
-            if (!isKingInCheck(c)) return false;
-            for (int x=0;x<8;x++) for (int y=0;y<8;y++) {
-                ChessPiece p = getPiece(x,y);
-                if (p != null && p.color == c) {
-                    if (!legalMoves(x,y, null).isEmpty()) return false;
-                }
-            }
-            return true;
-        }
-
-        boolean isStalemate(boolean whiteToMoveSide) {
-            Color c = whiteToMoveSide ? Color.WHITE : Color.BLACK;
-            if (isKingInCheck(c)) return false;
-            for (int x=0;x<8;x++) for (int y=0;y<8;y++) {
-                ChessPiece p = getPiece(x,y);
-                if (p != null && p.color == c) {
-                    if (!legalMoves(x,y, null).isEmpty()) return false;
-                }
-            }
-            return true;
-        }
-    }
-}
+        static SavedInventory
