@@ -19,7 +19,6 @@ import org.bukkit.persistence.PersistentDataType;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.bukkit.scheduler.BukkitTask;
 
-import java.net.URL;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
@@ -27,103 +26,43 @@ import java.util.stream.Collectors;
 /**
  * ChessPlugin: combined top+player inventory 8x8 board.
  *
+ * - Top chest (rows 0..3, cols 0..7) -> board rows 0..3
+ * - Player inventory visible area (main rows + hotbar; first 8 columns) -> board rows 4..7
+ *
  * Safety:
  * - Player inventories are saved before showing board and restored on close/end.
  * - Clicks in board area are cancelled and handled as chess moves.
  *
  * Notes:
- * - Promotion opens a GUI for choice (Queen, Rook, Bishop, Knight).
+ * - Promotion auto-queens.
  * - Castling, en passant, and check/checkmate are supported.
- * - Includes an in-game toggle and a remote GitHub kill switch.
  */
 public class ChessPlugin extends JavaPlugin implements Listener {
 
     public static NamespacedKey PIECE_KEY;
     private ChallengeManager challengeManager;
     private final Map<UUID, ChessGame> activeGames = new ConcurrentHashMap<>();
-    
-    // Plugin toggle state
-    public boolean pluginEnabled = true;
 
     @Override
     public void onEnable() {
-        // Run the remote kill switch check as soon as the plugin starts
-        checkRemoteGitHubStatus();
-
         PIECE_KEY = new NamespacedKey(this, "chess_piece");
         this.challengeManager = new ChallengeManager(this);
         getServer().getPluginManager().registerEvents(this, this);
-        
         Objects.requireNonNull(this.getCommand("chess")).setExecutor(new ChessCommand());
         Objects.requireNonNull(this.getCommand("chessaccept")).setExecutor(new ChessAcceptCommand());
         Objects.requireNonNull(this.getCommand("chessdeny")).setExecutor(new ChessDenyCommand());
-        Objects.requireNonNull(this.getCommand("chesstoggle")).setExecutor(new ChessToggleCommand());
-        
         getLogger().info("ChessPlugin enabled");
     }
 
     @Override
     public void onDisable() {
+        // End games (this closes inventories -> triggers restoration on close)
         for (ChessGame g : new ArrayList<>(activeGames.values())) {
             g.endGame("Server shutting down");
         }
     }
 
-    // --- GitHub Remote Kill Switch ---
-    private void checkRemoteGitHubStatus() {
-        Bukkit.getScheduler().runTaskAsynchronously(this, () -> {
-            try {
-                // IMPORTANT: Replace this URL with the RAW URL of your text file on GitHub
-                URL url = new URL("https://raw.githubusercontent.com/YourUsername/YourRepo/main/status.txt");
-                Scanner scanner = new Scanner(url.openStream());
-                
-                if (scanner.hasNextLine()) {
-                    String status = scanner.nextLine().trim();
-                    
-                    if (status.equalsIgnoreCase("false") || status.equalsIgnoreCase("off")) {
-                        getLogger().warning("GitHub kill switch activated! Disabling ChessPlugin...");
-                        pluginEnabled = false;
-                        
-                        // Bukkit requires plugins to be disabled on the main thread
-                        Bukkit.getScheduler().runTask(this, () -> {
-                            getServer().getPluginManager().disablePlugin(this);
-                        });
-                    } else {
-                        getLogger().info("GitHub remote status is clear. Plugin allowed to run.");
-                    }
-                }
-                scanner.close();
-            } catch (Exception e) {
-                getLogger().warning("Could not reach GitHub to check status. Defaulting to enabled. Error: " + e.getMessage());
-            }
-        });
-    }
-
     // Commands ----------------------------------------------------------------
-
-    private class ChessToggleCommand implements TabExecutor {
-        @Override
-        public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
-            if (sender instanceof Player && !sender.isOp() && !sender.hasPermission("chess.admin")) {
-                sender.sendMessage(ChatColor.RED + "You don't have permission to toggle the chess plugin.");
-                return true;
-            }
-            pluginEnabled = !pluginEnabled;
-            sender.sendMessage(ChatColor.YELLOW + "Chess plugin is now " + (pluginEnabled ? ChatColor.GREEN + "ENABLED" : ChatColor.RED + "DISABLED") + ".");
-            
-            if (!pluginEnabled) {
-                for (ChessGame g : new ArrayList<>(activeGames.values())) {
-                    g.endGame("An admin disabled the chess plugin.");
-                }
-            }
-            return true;
-        }
-
-        @Override
-        public List<String> onTabComplete(CommandSender sender, Command command, String alias, String[] args) {
-            return Collections.emptyList();
-        }
-    }
 
     private class ChessCommand implements TabExecutor {
         @Override
@@ -133,12 +72,6 @@ public class ChessPlugin extends JavaPlugin implements Listener {
                 return true;
             }
             Player p = (Player) sender;
-            
-            if (!pluginEnabled) {
-                p.sendMessage(ChatColor.RED + "The chess plugin is currently disabled.");
-                return true;
-            }
-
             if (args.length != 1) {
                 p.sendMessage(ChatColor.RED + "Usage: /chess <player>");
                 return true;
@@ -178,12 +111,11 @@ public class ChessPlugin extends JavaPlugin implements Listener {
     private class ChessAcceptCommand implements TabExecutor {
         @Override
         public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
-            if (!(sender instanceof Player)) return true;
-            Player accepter = (Player) sender;
-            if (!pluginEnabled) {
-                accepter.sendMessage(ChatColor.RED + "The chess plugin is currently disabled.");
+            if (!(sender instanceof Player)) {
+                sender.sendMessage("Players only.");
                 return true;
             }
+            Player accepter = (Player) sender;
             UUID challengerId = challengeManager.acceptChallenge(accepter);
             if (challengerId == null) {
                 accepter.sendMessage(ChatColor.RED + "You have no pending challenges.");
@@ -200,6 +132,7 @@ public class ChessPlugin extends JavaPlugin implements Listener {
             game.start();
             return true;
         }
+
         @Override
         public List<String> onTabComplete(CommandSender sender, Command command, String alias, String[] args) {
             return Collections.emptyList();
@@ -209,7 +142,10 @@ public class ChessPlugin extends JavaPlugin implements Listener {
     private class ChessDenyCommand implements TabExecutor {
         @Override
         public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
-            if (!(sender instanceof Player)) return true;
+            if (!(sender instanceof Player)) {
+                sender.sendMessage("Players only.");
+                return true;
+            }
             Player denier = (Player) sender;
             UUID challenger = challengeManager.denyChallenge(denier);
             if (challenger == null) {
@@ -223,6 +159,7 @@ public class ChessPlugin extends JavaPlugin implements Listener {
             denier.sendMessage(ChatColor.YELLOW + "Challenge denied.");
             return true;
         }
+
         @Override
         public List<String> onTabComplete(CommandSender sender, Command command, String alias, String[] args) {
             return Collections.emptyList();
@@ -238,31 +175,8 @@ public class ChessPlugin extends JavaPlugin implements Listener {
         Player p = (Player) he;
         ChessGame g = activeGames.get(p.getUniqueId());
         if (g == null) return;
-        
-        // Handle clicks in the Promotion Menu
-        if (e.getView().getTitle().equals(ChatColor.DARK_PURPLE + "Promote Pawn")) {
-            e.setCancelled(true);
-            if (e.getCurrentItem() == null || !e.getCurrentItem().hasItemMeta()) return;
-            String name = ChatColor.stripColor(e.getCurrentItem().getItemMeta().getDisplayName());
-            try {
-                ChessPieceType type = ChessPieceType.valueOf(name);
-                g.executePromotion(p, type);
-            } catch (IllegalArgumentException ex) {
-                // Not a valid piece, do nothing
-            }
-            return;
-        }
-
-        // Lock main board clicks if waiting for someone to promote
-        if (g.pendingPromotion) {
-            e.setCancelled(true);
-            return;
-        }
-
         e.setCancelled(true);
-        if (e.getView().getTitle().equals(ChatColor.DARK_GREEN + "Chess (8x8)")) {
-            g.onInventoryClick(p, e);
-        }
+        g.onInventoryClick(p, e);
     }
 
     @EventHandler
@@ -272,15 +186,7 @@ public class ChessPlugin extends JavaPlugin implements Listener {
         Player p = (Player) he;
         ChessGame g = activeGames.get(p.getUniqueId());
         if (g != null) {
-            // Handle cases where they close the GUI without picking a promotion
-            if (e.getView().getTitle().equals(ChatColor.DARK_PURPLE + "Promote Pawn")) {
-                if (g.pendingPromotion && p.getUniqueId().equals(g.pendingPromotionPlayer) && !g.transitioning) {
-                    // Default to Queen if they attempt to escape the menu
-                    g.executePromotion(p, ChessPieceType.QUEEN);
-                }
-            } else if (e.getView().getTitle().equals(ChatColor.DARK_GREEN + "Chess (8x8)")) {
-                g.onClose(p);
-            }
+            g.onClose(p);
         }
     }
 
@@ -288,7 +194,9 @@ public class ChessPlugin extends JavaPlugin implements Listener {
     public void onQuit(PlayerQuitEvent e) {
         Player p = e.getPlayer();
         ChessGame g = activeGames.get(p.getUniqueId());
-        if (g != null) g.onPlayerQuit(p);
+        if (g != null) {
+            g.onPlayerQuit(p);
+        }
     }
 
     void removeGame(ChessGame g) {
@@ -297,9 +205,11 @@ public class ChessPlugin extends JavaPlugin implements Listener {
     }
 
     // Challenge manager -------------------------------------------------------
+
     static class ChallengeManager {
         private final Map<UUID, Challenge> pending = new ConcurrentHashMap<>();
         private final JavaPlugin plugin;
+
         ChallengeManager(JavaPlugin plugin) {
             this.plugin = plugin;
             plugin.getServer().getScheduler().runTaskTimer(plugin, () -> {
@@ -309,25 +219,31 @@ public class ChessPlugin extends JavaPlugin implements Listener {
                     if (e.getValue().expiresAt <= now) {
                         Player c = plugin.getServer().getPlayer(e.getValue().challenger);
                         Player t = plugin.getServer().getPlayer(e.getKey());
-                        if (c != null && c.isOnline()) c.sendMessage(ChatColor.RED + "Your challenge expired.");
-                        if (t != null && t.isOnline()) t.sendMessage(ChatColor.RED + "Challenge expired.");
+                        if (c != null && c.isOnline()) c.sendMessage(ChatColor.RED + "Your challenge to " + (t != null ? t.getName() : "player") + " expired.");
+                        if (t != null && t.isOnline()) t.sendMessage(ChatColor.RED + "Challenge from " + (c != null ? c.getName() : "player") + " expired.");
                         toRemove.add(e.getKey());
                     }
                 }
                 toRemove.forEach(pending::remove);
             }, 20L, 20L);
         }
+
         void createChallenge(Player challenger, Player target) {
             pending.put(target.getUniqueId(), new Challenge(challenger.getUniqueId(), System.currentTimeMillis() + 30_000L));
         }
+
         UUID acceptChallenge(Player target) {
             Challenge c = pending.remove(target.getUniqueId());
-            return (c == null) ? null : c.challenger;
+            if (c == null) return null;
+            return c.challenger;
         }
+
         UUID denyChallenge(Player target) {
             Challenge c = pending.remove(target.getUniqueId());
-            return (c == null) ? null : c.challenger;
+            if (c == null) return null;
+            return c.challenger;
         }
+
         static class Challenge {
             final UUID challenger;
             final long expiresAt;
@@ -336,6 +252,7 @@ public class ChessPlugin extends JavaPlugin implements Listener {
     }
 
     // Chess game --------------------------------------------------------------
+
     static class ChessGame {
         final ChessPlugin plugin;
         final Player white;
@@ -344,19 +261,11 @@ public class ChessPlugin extends JavaPlugin implements Listener {
         UUID selectedPlayer = null;
         int selectedX = -1, selectedY = -1;
         final Map<UUID, SavedInventory> saved = new HashMap<>();
-        
         int whiteTime = 5 * 60;
         int blackTime = 5 * 60;
         BukkitTask timerTask;
         boolean running = false;
         int[] lastDoublePawn = null;
-        
-        // Promotion state variables
-        boolean pendingPromotion = false;
-        UUID pendingPromotionPlayer = null;
-        int promotionX = -1, promotionY = -1;
-        Color promotionColor = null;
-        boolean transitioning = false; // Flag to prevent inv restoration during GUI swaps
 
         ChessGame(ChessPlugin plugin, Player white, Player black) {
             this.plugin = plugin;
@@ -376,7 +285,7 @@ public class ChessPlugin extends JavaPlugin implements Listener {
         }
 
         void tick() {
-            if (!running || pendingPromotion) return; // Pause timer during promotion
+            if (!running) return;
             if (board.whiteToMove) {
                 whiteTime--;
                 if (whiteTime <= 0) endGame("Black wins on time");
@@ -410,7 +319,6 @@ public class ChessPlugin extends JavaPlugin implements Listener {
         }
 
         void onClose(Player p) {
-            if (transitioning) return; // Don't restore inventory if just switching to/from promo menu
             SavedInventory s = saved.remove(p.getUniqueId());
             if (s != null) {
                 s.restore(p);
@@ -432,7 +340,8 @@ public class ChessPlugin extends JavaPlugin implements Listener {
             for (int guiRow = 0; guiRow < 4; guiRow++) {
                 for (int guiCol = 0; guiCol < 8; guiCol++) {
                     int slot = guiRow * 9 + guiCol;
-                    inv.setItem(slot, toItemFor(board.getPiece(guiRow, guiCol)));
+                    ChessPiece piece = board.getPiece(guiRow, guiCol);
+                    inv.setItem(slot, toItemFor(piece));
                 }
                 int ctrlSlot = guiRow * 9 + 8;
                 String text;
@@ -457,45 +366,16 @@ public class ChessPlugin extends JavaPlugin implements Listener {
                 int boardRow = 4 + br;
                 for (int col = 0; col < 8; col++) {
                     ItemStack item = toItemFor(board.getPiece(boardRow, col));
-                    int invIndex = (br == 3) ? col : 9 + br * 9 + col;
+                    int invIndex;
+                    if (br == 3) {
+                        invIndex = col;
+                    } else {
+                        invIndex = 9 + br * 9 + col;
+                    }
                     pinv.setItem(invIndex, item);
                 }
             }
             p.openInventory(inv);
-        }
-
-        // Promotion Menu Builder
-        void openPromotionMenu(Player p) {
-            Inventory inv = Bukkit.createInventory(null, 9, ChatColor.DARK_PURPLE + "Promote Pawn");
-            inv.setItem(1, createPromoItem(Material.GOLD_BLOCK, ChessPieceType.QUEEN));
-            inv.setItem(3, createPromoItem(Material.IRON_BLOCK, ChessPieceType.ROOK));
-            inv.setItem(5, createPromoItem(Material.BRICK, ChessPieceType.BISHOP));
-            inv.setItem(7, createPromoItem(Material.SADDLE, ChessPieceType.KNIGHT));
-            p.openInventory(inv);
-        }
-
-        private ItemStack createPromoItem(Material mat, ChessPieceType type) {
-            ItemStack it = new ItemStack(mat);
-            ItemMeta meta = it.getItemMeta();
-            meta.setDisplayName(ChatColor.AQUA + type.name());
-            it.setItemMeta(meta);
-            return it;
-        }
-
-        // Execute chosen promotion and continue the game loop
-        void executePromotion(Player p, ChessPieceType type) {
-            if (!pendingPromotion) return;
-            board.setPiece(promotionX, promotionY, new ChessPiece(promotionColor, type, promotionX, promotionY));
-            
-            pendingPromotion = false;
-            pendingPromotionPlayer = null;
-            
-            // Reopen board
-            transitioning = true;
-            openFor(p);
-            transitioning = false;
-            
-            finishTurn();
         }
 
         private ItemStack createButton(Material mat, String name) {
@@ -507,7 +387,9 @@ public class ChessPlugin extends JavaPlugin implements Listener {
         }
 
         private String formatTime(int secs) {
-            return String.format("%d:%02d", secs / 60, secs % 60);
+            int m = secs / 60;
+            int s = secs % 60;
+            return String.format("%d:%02d", m, s);
         }
 
         private ItemStack toItemFor(ChessPiece p) {
@@ -553,8 +435,10 @@ public class ChessPlugin extends JavaPlugin implements Listener {
                         case "Close": p.closeInventory(); return;
                     }
                 }
-                if (r >= 0 && r < 4 && c >= 0 && c < 8) {
-                    handleBoardClick(p, r, c);
+                int guiRow = raw / 9;
+                int guiCol = raw % 9;
+                if (guiRow >= 0 && guiRow < 4 && guiCol >= 0 && guiCol < 8) {
+                    handleBoardClick(p, guiRow, guiCol);
                 }
             } else {
                 int bottomIndex = raw - 54;
@@ -569,12 +453,16 @@ public class ChessPlugin extends JavaPlugin implements Listener {
         private void handleBoardClick(Player player, int br, int bc) {
             if (!running) return;
             ChessPiece clicked = board.getPiece(br, bc);
-            
             if (selectedPlayer == null) {
                 if (clicked == null) return;
-                if (clicked.color == Color.WHITE && !board.whiteToMove) { player.sendMessage(ChatColor.RED + "It's not White's turn."); return; }
-                if (clicked.color == Color.BLACK && board.whiteToMove) { player.sendMessage(ChatColor.RED + "It's not Black's turn."); return; }
-                
+                if (clicked.color == Color.WHITE && !board.whiteToMove) {
+                    player.sendMessage(ChatColor.RED + "It's not White's turn.");
+                    return;
+                }
+                if (clicked.color == Color.BLACK && board.whiteToMove) {
+                    player.sendMessage(ChatColor.RED + "It's not Black's turn.");
+                    return;
+                }
                 selectedPlayer = player.getUniqueId();
                 selectedX = br; selectedY = bc;
                 player.sendMessage(ChatColor.YELLOW + "Selected " + clicked.type.name() + " at " + squareName(br, bc));
@@ -584,9 +472,9 @@ public class ChessPlugin extends JavaPlugin implements Listener {
                     return;
                 }
                 int fromX = selectedX, fromY = selectedY;
+                int toX = br, toY = bc;
                 List<ChessMove> legal = board.legalMoves(fromX, fromY, lastDoublePawn);
-                Optional<ChessMove> chosen = legal.stream().filter(m -> m.toX == br && m.toY == bc).findFirst();
-                
+                Optional<ChessMove> chosen = legal.stream().filter(m -> m.toX == toX && m.toY == toY).findFirst();
                 if (chosen.isEmpty()) {
                     ChessPiece cc = board.getPiece(br, bc);
                     ChessPiece fromPiece = board.getPiece(fromX, fromY);
@@ -600,63 +488,55 @@ public class ChessPlugin extends JavaPlugin implements Listener {
                     return;
                 }
                 ChessMove move = chosen.get();
-                lastDoublePawn = move.isDoublePawn ? new int[]{move.toX, move.toY} : null;
-                
+                if (move.isDoublePawn) lastDoublePawn = new int[]{move.toX, move.toY};
+                else lastDoublePawn = null;
                 board.applyMove(move);
-                
-                // Halt turn to open promotion menu
                 if (move.promotion) {
-                    pendingPromotion = true;
-                    pendingPromotionPlayer = player.getUniqueId();
-                    promotionX = move.toX;
-                    promotionY = move.toY;
-                    promotionColor = move.promotionColor;
-                    
-                    transitioning = true;
-                    openPromotionMenu(player);
-                    transitioning = false;
-                    return; 
+                    board.setPiece(move.toX, move.toY, new ChessPiece(move.promotionColor, ChessPieceType.QUEEN, move.toX, move.toY));
                 }
-                
-                finishTurn();
-            }
-        }
-
-        // Abstracted Turn Finisher logic
-        void finishTurn() {
-            board.whiteToMove = !board.whiteToMove;
-            selectedPlayer = null; selectedX = -1; selectedY = -1;
-            updateAllInventories();
-            
-            if (board.isInCheckmate(board.whiteToMove)) {
-                endGame((board.whiteToMove ? "White" : "Black") + " is checkmated. " + (board.whiteToMove ? black.getName() : white.getName()) + " wins.");
-            } else if (board.isStalemate(board.whiteToMove)) {
-                endGame("Draw by stalemate.");
+                board.whiteToMove = !board.whiteToMove;
+                selectedPlayer = null; selectedX = -1; selectedY = -1;
+                updateAllInventories();
+                if (board.isInCheckmate(board.whiteToMove)) {
+                    endGame((board.whiteToMove ? "White" : "Black") + " is checkmated. " + (board.whiteToMove ? black.getName() : white.getName()) + " wins.");
+                    return;
+                }
+                if (board.isStalemate(board.whiteToMove)) {
+                    endGame("Draw by stalemate.");
+                    return;
+                }
             }
         }
 
         private String squareName(int r, int c) {
-            return "" + (char) ('a' + c) + (8 - r);
+            char file = (char) ('a' + c);
+            int rank = 8 - r;
+            return "" + file + rank;
         }
 
         void updateAllInventories() {
             for (Player p : Arrays.asList(white, black)) {
                 if (!p.isOnline()) continue;
                 InventoryView iv = p.getOpenInventory();
-                if (iv != null && iv.getTitle().equals(ChatColor.DARK_GREEN + "Chess (8x8)")) {
-                    Inventory top = iv.getTopInventory();
+                if (iv == null) continue;
+                Inventory top = iv.getTopInventory();
+                if (top == null) continue;
+                if (iv.getTitle().equals(ChatColor.DARK_GREEN + "Chess (8x8)")) {
                     for (int guiRow = 0; guiRow < 4; guiRow++) {
                         for (int guiCol = 0; guiCol < 8; guiCol++) {
-                            top.setItem(guiRow * 9 + guiCol, toItemFor(board.getPiece(guiRow, guiCol)));
+                            int slot = guiRow * 9 + guiCol;
+                            ChessPiece piece = board.getPiece(guiRow, guiCol);
+                            top.setItem(slot, toItemFor(piece));
                         }
                         int ctrlSlot = guiRow * 9 + 8;
                         ItemStack info = top.getItem(ctrlSlot);
                         if (info != null && info.hasItemMeta()) {
                             ItemMeta meta = info.getItemMeta();
-                            String text = (guiRow == 0) ? ChatColor.AQUA + "White: " + formatTime(whiteTime) :
-                                          (guiRow == 1) ? ChatColor.AQUA + "Black: " + formatTime(blackTime) :
-                                          (guiRow == 2) ? ChatColor.YELLOW + "Turn: " + (board.whiteToMove ? "White" : "Black") :
-                                          ChatColor.GRAY + "8x8 Board";
+                            String text;
+                            if (guiRow == 0) text = ChatColor.AQUA + "White: " + formatTime(whiteTime);
+                            else if (guiRow == 1) text = ChatColor.AQUA + "Black: " + formatTime(blackTime);
+                            else if (guiRow == 2) text = ChatColor.YELLOW + "Turn: " + (board.whiteToMove ? "White" : "Black");
+                            else text = ChatColor.GRAY + "8x8 Board";
                             meta.setDisplayName(text);
                             info.setItemMeta(meta);
                             top.setItem(ctrlSlot, info);
@@ -664,9 +544,13 @@ public class ChessPlugin extends JavaPlugin implements Listener {
                     }
                     PlayerInventory pinv = p.getInventory();
                     for (int br = 0; br < 4; br++) {
+                        int boardRow = 4 + br;
                         for (int col = 0; col < 8; col++) {
-                            int invIndex = (br == 3) ? col : 9 + br * 9 + col;
-                            pinv.setItem(invIndex, toItemFor(board.getPiece(4 + br, col)));
+                            ItemStack item = toItemFor(board.getPiece(boardRow, col));
+                            int invIndex;
+                            if (br == 3) invIndex = col;
+                            else invIndex = 9 + br * 9 + col;
+                            pinv.setItem(invIndex, item);
                         }
                     }
                 }
@@ -675,41 +559,55 @@ public class ChessPlugin extends JavaPlugin implements Listener {
     }
 
     static class SavedInventory {
-        final ItemStack[] contents, armor;
+        final ItemStack[] contents;
+        final ItemStack[] armor;
         final ItemStack offhand;
+
         private SavedInventory(ItemStack[] contents, ItemStack[] armor, ItemStack offhand) {
-            this.contents = contents; this.armor = armor; this.offhand = offhand;
+            this.contents = contents;
+            this.armor = armor;
+            this.offhand = offhand;
         }
+
         static SavedInventory save(Player p) {
             PlayerInventory inv = p.getInventory();
-            return new SavedInventory(
-                Arrays.stream(inv.getContents()).map(i -> i == null ? null : i.clone()).toArray(ItemStack[]::new),
-                Arrays.stream(inv.getArmorContents()).map(i -> i == null ? null : i.clone()).toArray(ItemStack[]::new),
-                inv.getItemInOffHand() == null ? null : inv.getItemInOffHand().clone()
-            );
+            ItemStack[] contentsCopy = Arrays.stream(inv.getContents())
+                    .map(item -> item == null ? null : item.clone())
+                    .toArray(ItemStack[]::new);
+            ItemStack[] armorCopy = Arrays.stream(inv.getArmorContents())
+                    .map(item -> item == null ? null : item.clone())
+                    .toArray(ItemStack[]::new);
+            ItemStack off = inv.getItemInOffHand() == null ? null : inv.getItemInOffHand().clone();
+            return new SavedInventory(contentsCopy, armorCopy, off);
         }
+
         void restore(Player p) {
             PlayerInventory inv = p.getInventory();
-            inv.setContents(Arrays.stream(contents).map(i -> i == null ? null : i.clone()).toArray(ItemStack[]::new));
-            inv.setArmorContents(Arrays.stream(armor).map(i -> i == null ? null : i.clone()).toArray(ItemStack[]::new));
+            inv.setContents(Arrays.stream(contents).map(item -> item == null ? null : item.clone()).toArray(ItemStack[]::new));
+            inv.setArmorContents(Arrays.stream(armor).map(item -> item == null ? null : item.clone()).toArray(ItemStack[]::new));
             inv.setItemInOffHand(offhand == null ? null : offhand.clone());
         }
     }
 
-    // Engine ------------------------------------------------------------------
     enum Color { WHITE, BLACK }
     enum ChessPieceType { PAWN, ROOK, KNIGHT, BISHOP, QUEEN, KING }
 
     static class ChessPiece {
-        final Color color; final ChessPieceType type; int x, y; boolean hasMoved = false;
+        final Color color;
+        final ChessPieceType type;
+        int x, y;
+        boolean hasMoved = false;
         ChessPiece(Color color, ChessPieceType type, int x, int y) { this.color = color; this.type = type; this.x = x; this.y = y; }
         String toShortString() { return color.name().charAt(0) + "-" + type.name().charAt(0); }
     }
 
     static class ChessMove {
         int fromX, fromY, toX, toY;
-        boolean isDoublePawn = false, promotion = false, isCastling = false;
+        ChessPieceType promotionTo = null;
+        boolean isDoublePawn = false;
+        boolean promotion = false;
         Color promotionColor = null;
+        boolean isCastling = false;
         ChessMove(int fx,int fy,int tx,int ty){fromX=fx;fromY=fy;toX=tx;toY=ty;}
     }
 
@@ -717,23 +615,35 @@ public class ChessPlugin extends JavaPlugin implements Listener {
         private final ChessPiece[][] b = new ChessPiece[8][8];
         boolean whiteToMove = true;
 
-        ChessPiece getPiece(int x, int y) { return (x<0||x>7||y<0||y>7) ? null : b[x][y]; }
-        void setPiece(int x, int y, ChessPiece p) { if (x>=0&&x<=7&&y>=0&&y<=7) { b[x][y] = p; if (p!=null){p.x=x;p.y=y;} } }
-        
+        ChessPiece getPiece(int x, int y) {
+            if (x<0||x>7||y<0||y>7) return null;
+            return b[x][y];
+        }
+        void setPiece(int x, int y, ChessPiece p) {
+            if (x<0||x>7||y<0||y>7) return;
+            b[x][y] = p;
+            if (p!=null){p.x=x;p.y=y;}
+        }
         void resetInitialPosition() {
             for (int x=0;x<8;x++) for (int y=0;y<8;y++) b[x][y]=null;
-            for (int y=0;y<8;y++) {
-                setPiece(1,y,new ChessPiece(Color.WHITE, ChessPieceType.PAWN,1,y));
-                setPiece(6,y,new ChessPiece(Color.BLACK, ChessPieceType.PAWN,6,y));
-            }
-            setPiece(0,0,new ChessPiece(Color.WHITE,ChessPieceType.ROOK,0,0)); setPiece(0,7,new ChessPiece(Color.WHITE,ChessPieceType.ROOK,0,7));
-            setPiece(7,0,new ChessPiece(Color.BLACK,ChessPieceType.ROOK,7,0)); setPiece(7,7,new ChessPiece(Color.BLACK,ChessPieceType.ROOK,7,7));
-            setPiece(0,1,new ChessPiece(Color.WHITE,ChessPieceType.KNIGHT,0,1)); setPiece(0,6,new ChessPiece(Color.WHITE,ChessPieceType.KNIGHT,0,6));
-            setPiece(7,1,new ChessPiece(Color.BLACK,ChessPieceType.KNIGHT,7,1)); setPiece(7,6,new ChessPiece(Color.BLACK,ChessPieceType.KNIGHT,7,6));
-            setPiece(0,2,new ChessPiece(Color.WHITE,ChessPieceType.BISHOP,0,2)); setPiece(0,5,new ChessPiece(Color.WHITE,ChessPieceType.BISHOP,0,5));
-            setPiece(7,2,new ChessPiece(Color.BLACK,ChessPieceType.BISHOP,7,2)); setPiece(7,5,new ChessPiece(Color.BLACK,ChessPieceType.BISHOP,7,5));
-            setPiece(0,3,new ChessPiece(Color.WHITE,ChessPieceType.QUEEN,0,3)); setPiece(7,3,new ChessPiece(Color.BLACK,ChessPieceType.QUEEN,7,3));
-            setPiece(0,4,new ChessPiece(Color.WHITE,ChessPieceType.KING,0,4)); setPiece(7,4,new ChessPiece(Color.BLACK,ChessPieceType.KING,7,4));
+            for (int y=0;y<8;y++) setPiece(1,y,new ChessPiece(Color.WHITE, ChessPieceType.PAWN,1,y));
+            for (int y=0;y<8;y++) setPiece(6,y,new ChessPiece(Color.BLACK, ChessPieceType.PAWN,6,y));
+            setPiece(0,0,new ChessPiece(Color.WHITE,ChessPieceType.ROOK,0,0));
+            setPiece(0,7,new ChessPiece(Color.WHITE,ChessPieceType.ROOK,0,7));
+            setPiece(7,0,new ChessPiece(Color.BLACK,ChessPieceType.ROOK,7,0));
+            setPiece(7,7,new ChessPiece(Color.BLACK,ChessPieceType.ROOK,7,7));
+            setPiece(0,1,new ChessPiece(Color.WHITE,ChessPieceType.KNIGHT,0,1));
+            setPiece(0,6,new ChessPiece(Color.WHITE,ChessPieceType.KNIGHT,0,6));
+            setPiece(7,1,new ChessPiece(Color.BLACK,ChessPieceType.KNIGHT,7,1));
+            setPiece(7,6,new ChessPiece(Color.BLACK,ChessPieceType.KNIGHT,7,6));
+            setPiece(0,2,new ChessPiece(Color.WHITE,ChessPieceType.BISHOP,0,2));
+            setPiece(0,5,new ChessPiece(Color.WHITE,ChessPieceType.BISHOP,0,5));
+            setPiece(7,2,new ChessPiece(Color.BLACK,ChessPieceType.BISHOP,7,2));
+            setPiece(7,5,new ChessPiece(Color.BLACK,ChessPieceType.BISHOP,7,5));
+            setPiece(0,3,new ChessPiece(Color.WHITE,ChessPieceType.QUEEN,0,3));
+            setPiece(7,3,new ChessPiece(Color.BLACK,ChessPieceType.QUEEN,7,3));
+            setPiece(0,4,new ChessPiece(Color.WHITE,ChessPieceType.KING,0,4));
+            setPiece(7,4,new ChessPiece(Color.BLACK,ChessPieceType.KING,7,4));
             whiteToMove = true;
         }
 
@@ -764,13 +674,12 @@ public class ChessPlugin extends JavaPlugin implements Listener {
             if (p == null) return Collections.emptyList();
             List<ChessMove> out = new ArrayList<>();
             int dir = (p.color == Color.WHITE) ? 1 : -1;
-            
             switch (p.type) {
                 case PAWN:
                     int nx = x + dir;
                     if (onBoard(nx,y) && getPiece(nx,y)==null) {
                         ChessMove m = new ChessMove(x,y,nx,y);
-                        if (nx==7 || nx==0) { m.promotion = true; m.promotionColor = p.color; }
+                        if (nx==7 || nx==0) { m.promotion = true; m.promotionColor = p.color; m.promotionTo = ChessPieceType.QUEEN; }
                         out.add(m);
                         if ((p.color==Color.WHITE && x==1) || (p.color==Color.BLACK && x==6)) {
                             int nx2 = x + 2*dir;
@@ -786,7 +695,7 @@ public class ChessPlugin extends JavaPlugin implements Listener {
                             ChessPiece targ = getPiece(cx,cy);
                             if (targ != null && targ.color != p.color) {
                                 ChessMove m = new ChessMove(x,y,cx,cy);
-                                if (cx==7 || cx==0) { m.promotion=true; m.promotionColor=p.color;}
+                                if (cx==7 || cx==0) { m.promotion=true; m.promotionTo=ChessPieceType.QUEEN; m.promotionColor=p.color;}
                                 out.add(m);
                             }
                         }
@@ -795,11 +704,157 @@ public class ChessPlugin extends JavaPlugin implements Listener {
                         int ldX = lastDoublePawn[0], ldY = lastDoublePawn[1];
                         if (x == (p.color==Color.WHITE ? 4 : 3)) {
                             if (Math.abs(ldY - y) == 1 && ldX == x) {
-                                out.add(new ChessMove(x,y,x+dir,ldY));
+                                int capToX = x + dir;
+                                int capToY = ldY;
+                                ChessMove m = new ChessMove(x,y,capToX,capToY);
+                                out.add(m);
                             }
                         }
                     }
                     break;
                 case KNIGHT:
-                    for (int[] s: new int[][]{{1,2},{2,1},{-1,2},{-2,1},{1,-2},{2,-1},{-1,-2},{-2,-1}}) {
-                        int tx=x+s[0], ty=
+                    int[][] ksteps = {{1,2},{2,1},{-1,2},{-2,1},{1,-2},{2,-1},{-1,-2},{-2,-1}};
+                    for (int[] s: ksteps) {
+                        int tx=x+s[0], ty=y+s[1];
+                        if (!onBoard(tx,ty)) continue;
+                        ChessPiece t = getPiece(tx,ty);
+                        if (t==null || t.color!=p.color) out.add(new ChessMove(x,y,tx,ty));
+                    }
+                    break;
+                case BISHOP:
+                    addSlidingMoves(out,x,y,p,new int[][]{{1,1},{1,-1},{-1,1},{-1,-1}});
+                    break;
+                case ROOK:
+                    addSlidingMoves(out,x,y,p,new int[][]{{1,0},{-1,0},{0,1},{0,-1}});
+                    break;
+                case QUEEN:
+                    addSlidingMoves(out,x,y,p,new int[][]{{1,1},{1,-1},{-1,1},{-1,-1},{1,0},{-1,0},{0,1},{0,-1}});
+                    break;
+                case KING:
+                    for (int dx=-1;dx<=1;dx++) for (int dy=-1;dy<=1;dy++){
+                        if (dx==0&&dy==0) continue;
+                        int tx=x+dx, ty=y+dy;
+                        if (!onBoard(tx,ty)) continue;
+                        ChessPiece t = getPiece(tx,ty);
+                        if (t==null || t.color!=p.color) out.add(new ChessMove(x,y,tx,ty));
+                    }
+                    if (!p.hasMoved) {
+                        ChessPiece hRook = getPiece(x, 7);
+                        if (hRook != null && hRook.type == ChessPieceType.ROOK && !hRook.hasMoved) {
+                            if (getPiece(x, 5) == null && getPiece(x, 6) == null) {
+                                ChessMove m = new ChessMove(x, y, x, y + 2);
+                                m.isCastling = true;
+                                out.add(m);
+                            }
+                        }
+                        ChessPiece aRook = getPiece(x, 0);
+                        if (aRook != null && aRook.type == ChessPieceType.ROOK && !aRook.hasMoved) {
+                            if (getPiece(x, 1) == null && getPiece(x, 2) == null && getPiece(x, 3) == null) {
+                                ChessMove m = new ChessMove(x, y, x, y - 2);
+                                m.isCastling = true;
+                                out.add(m);
+                            }
+                        }
+                    }
+                    break;
+            }
+            return out;
+        }
+
+        private void addSlidingMoves(List<ChessMove> out, int x, int y, ChessPiece p, int[][] dirs) {
+            for (int[] d : dirs) {
+                int tx = x + d[0], ty = y + d[1];
+                while (onBoard(tx,ty)) {
+                    ChessPiece t = getPiece(tx,ty);
+                    if (t == null) out.add(new ChessMove(x,y,tx,ty));
+                    else { if (t.color != p.color) out.add(new ChessMove(x,y,tx,ty)); break; }
+                    tx += d[0]; ty += d[1];
+                }
+            }
+        }
+
+        boolean onBoard(int x,int y){return x>=0&&x<8&&y>=0&&y<8;}
+
+        void applyMove(ChessMove m) {
+            ChessPiece p = getPiece(m.fromX,m.fromY);
+            if (p==null) return;
+            if (p.type == ChessPieceType.PAWN && Math.abs(m.toY - m.fromY) == 1 && getPiece(m.toX, m.toY) == null && m.toX != m.fromX) {
+                int capX = m.fromX;
+                int capY = m.toY;
+                setPiece(capX, capY, null);
+            }
+            if (m.isCastling) {
+                if (m.toY > m.fromY) {
+                    ChessPiece rook = getPiece(m.fromX, 7);
+                    setPiece(m.fromX, 5, rook);
+                    setPiece(m.fromX, 7, null);
+                    if (rook != null) rook.hasMoved = true;
+                } else {
+                    ChessPiece rook = getPiece(m.fromX, 0);
+                    setPiece(m.fromX, 3, rook);
+                    setPiece(m.fromX, 0, null);
+                    if (rook != null) rook.hasMoved = true;
+                }
+            }
+            p.hasMoved = true;
+            setPiece(m.toX,m.toY,p);
+            setPiece(m.fromX,m.fromY,null);
+        }
+
+        ChessBoard copy() {
+            ChessBoard c = new ChessBoard();
+            for (int x=0;x<8;x++) for (int y=0;y<8;y++) {
+                ChessPiece p = b[x][y];
+                if (p != null) {
+                    c.b[x][y] = new ChessPiece(p.color, p.type, x, y);
+                    c.b[x][y].hasMoved = p.hasMoved;
+                }
+            }
+            c.whiteToMove = whiteToMove;
+            return c;
+        }
+
+        boolean isKingInCheck(Color kingColor) {
+            int kx=-1, ky=-1;
+            for (int x=0;x<8;x++) for (int y=0;y<8;y++) {
+                ChessPiece p = getPiece(x,y);
+                if (p != null && p.type==ChessPieceType.KING && p.color==kingColor) { kx=x; ky=y; }
+            }
+            if (kx==-1) return true;
+            Color enemy = kingColor == Color.WHITE ? Color.BLACK : Color.WHITE;
+            for (int x=0;x<8;x++) for (int y=0;y<8;y++) {
+                ChessPiece p = getPiece(x,y);
+                if (p != null && p.color == enemy) {
+                    for (ChessMove m : pseudoLegalMoves(x,y, null)) {
+                        if (m.toX == kx && m.toY == ky) return true;
+                    }
+                }
+            }
+            return false;
+        }
+
+        boolean isInCheckmate(boolean whiteToMoveSide) {
+            Color c = whiteToMoveSide ? Color.WHITE : Color.BLACK;
+            if (!isKingInCheck(c)) return false;
+            for (int x=0;x<8;x++) for (int y=0;y<8;y++) {
+                ChessPiece p = getPiece(x,y);
+                if (p != null && p.color == c) {
+                    if (!legalMoves(x,y, null).isEmpty()) return false;
+                }
+            }
+            return true;
+        }
+
+        boolean isStalemate(boolean whiteToMoveSide) {
+            Color c = whiteToMoveSide ? Color.WHITE : Color.BLACK;
+            if (isKingInCheck(c)) return false;
+            for (int x=0;x<8;x++) for (int y=0;y<8;y++) {
+                ChessPiece p = getPiece(x,y);
+                if (p != null && p.color == c) {
+                    if (!legalMoves(x,y, null).isEmpty()) return false;
+                }
+            }
+            return true;
+        }
+    }
+}
