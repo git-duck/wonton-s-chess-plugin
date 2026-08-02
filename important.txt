@@ -1,0 +1,30 @@
+Copyright (c) 2026 eeveesun, wonton_stew, git-duck, & MrFrenchGuy23. All Rights Reserved.
+
+TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION
+
+1. OWNERSHIP
+The software, source code, and compiled binaries (hereafter referred to as "the Software") 
+contained in this repository are the exclusive intellectual property of the original authors 
+("eeveesun", "wonton_stew", "git-duck", and "MrFrenchGuy23"). 
+
+2. LIMITED EVALUATION LICENSE
+Permission is hereby granted to authorized servers with consent from all developers of this plugin.
+
+3. RESTRICTIONS
+You may not:
+   - Redistribute, sell, lease, or sub-license the Software to any third party.
+   - Decompile, reverse engineer, or modify the Software without explicit written permission.
+   - Run, host, or utilize the Software on a live, public, or commercial Minecraft server 
+     without a separate formal deployment agreement signed by the authors.
+
+4. REVOCATION OF USAGE RIGHTS
+The authors reserve the express right to terminate this evaluation license and revoke permission 
+to use, host, or run the Software at any time, for any reason, without prior notice. Upon 
+written or verbal notification of revocation by the authors, you must immediately cease all 
+use of the Software and permanently delete all copies of the source code and compiled 
+binaries (.jar files) from your systems, servers, and storage networks.
+
+5. NO WARRANTY
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED. IN NO 
+EVENT SHALL THE AUTHORS BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER LIABILITY ARISING FROM, 
+OUT OF, OR IN CONNECTION WITH THE SOFTWARE.
