@@ -11,7 +11,7 @@ And also make it so that pawns don't auto promote to queens.
 * **[eeveesun](https://github.com)** — *Original Creator*
   Up to this point ITS ALL ME. ALL ME.
 * **[MrFrenchGuy23](https://github.com)** — 
-  He hasn't done anything yet, I just invited him.
+  He hasn't done anything yet, I just invited him. Finally locked in, he's debugging some stuff.
 
 ## Core Features
 
