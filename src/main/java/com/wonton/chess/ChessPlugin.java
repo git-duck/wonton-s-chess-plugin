@@ -272,8 +272,9 @@ public class ChessPlugin extends JavaPlugin implements Listener {
             }
             int minutes = 3;
             boolean humanWhite = true;
-            if (args.length > 2) {
-                p.sendMessage(ChatColor.RED + "Usage: /chessai [1|3|5|10] [white|black]");
+            ChessAI.Difficulty difficulty = ChessAI.Difficulty.MEDIUM;
+            if (args.length > 3) {
+                p.sendMessage(ChatColor.RED + "Usage: /chessai [easy|casual|medium|hard|extreme] [1|3|5|10] [white|black]");
                 return true;
             }
             for (String a : args) {
@@ -284,8 +285,12 @@ public class ChessPlugin extends JavaPlugin implements Listener {
                 } else if (a.matches("1|3|5|10")) {
                     minutes = Integer.parseInt(a);
                 } else {
-                    p.sendMessage(ChatColor.RED + "Usage: /chessai [1|3|5|10] [white|black]");
-                    return true;
+                    ChessAI.Difficulty d = ChessAI.Difficulty.fromString(a);
+                    if (d == null) {
+                        p.sendMessage(ChatColor.RED + "Usage: /chessai [easy|casual|medium|hard|extreme] [1|3|5|10] [white|black]");
+                        return true;
+                    }
+                    difficulty = d;
                 }
             }
             if (activeGames.containsKey(p.getUniqueId())) {
@@ -295,6 +300,7 @@ public class ChessPlugin extends JavaPlugin implements Listener {
             ChessGame game = new ChessGame(ChessPlugin.this, p, p, minutes);
             game.whiteIsAI = !humanWhite;
             game.blackIsAI = humanWhite;
+            game.aiDifficulty = difficulty;
             activeGames.put(p.getUniqueId(), game);
             game.start();
             return true;
@@ -302,9 +308,9 @@ public class ChessPlugin extends JavaPlugin implements Listener {
 
         @Override
         public List<String> onTabComplete(CommandSender sender, Command command, String alias, String[] args) {
-            if (args.length <= 2) {
+            if (args.length <= 3) {
                 String prefix = args[args.length - 1].toLowerCase();
-                return Arrays.asList("1", "3", "5", "10", "white", "black").stream()
+                return Arrays.asList("easy", "casual", "medium", "hard", "extreme", "1", "3", "5", "10", "white", "black").stream()
                         .filter(s -> s.startsWith(prefix))
                         .collect(Collectors.toList());
             }
@@ -532,6 +538,7 @@ public class ChessPlugin extends JavaPlugin implements Listener {
         boolean whiteIsAI = false;
         boolean blackIsAI = false;
         boolean aiThinking = false;
+        ChessAI.Difficulty aiDifficulty = ChessAI.Difficulty.MEDIUM;
 
         ChessGame(ChessPlugin plugin, Player white, Player black, int minutes) {
             this.plugin = plugin;
@@ -565,7 +572,7 @@ public class ChessPlugin extends JavaPlugin implements Listener {
             String cat = categoryFor(minutes);
             sendBoth(ChatColor.GREEN + "Game started! " + timeControlName() + " (" + minutes + "m).");
             if (whiteIsAI || blackIsAI) {
-                sendBoth(ChatColor.GRAY + "You are " + (whiteIsAI ? "Black" : "White") + " vs AI. Ratings are not affected.");
+                sendBoth(ChatColor.GRAY + "You are " + (whiteIsAI ? "Black" : "White") + " vs AI (" + aiDifficulty.label + "). Ratings are not affected.");
             } else {
                 sendBoth(ChatColor.GRAY + "White " + white.getName() + " [" + plugin.eloManager.getRating(white.getUniqueId(), cat) + "] vs Black " + black.getName() + " [" + plugin.eloManager.getRating(black.getUniqueId(), cat) + "]");
             }
@@ -684,17 +691,26 @@ public class ChessPlugin extends JavaPlugin implements Listener {
         }
 
         void doAIMove() {
-            aiThinking = false;
             if (!running) return;
             if (!aiToMove()) return;
-            ChessMove best = new ChessAI().findBestMove(board, lastDoublePawn, minutes);
-            if (best == null) {
-                sendBoth(ChatColor.RED + "AI could not find a move.");
-                return;
-            }
-            sendBoth(ChatColor.GRAY + "AI played " + squareName(best.fromX, best.fromY) + "->" + squareName(best.toX, best.toY)
-                    + (best.promotion ? " (promotes to " + best.promotionTo.name().toLowerCase() + ")" : "") + ".");
-            completeMove(best, best.promotionTo);
+            // aiThinking stays true until the move is applied, so tick() cannot re-schedule
+            final ChessBoard snapshot = board.copy();
+            final int[] ldp = lastDoublePawn == null ? null : lastDoublePawn.clone();
+            plugin.getServer().getScheduler().runTaskAsynchronously(plugin, () -> {
+                ChessMove best = new ChessAI().findBestMove(snapshot, ldp, aiDifficulty);
+                plugin.getServer().getScheduler().runTask(plugin, () -> {
+                    aiThinking = false;
+                    if (!running) return;
+                    if (!aiToMove()) return;
+                    if (best == null) {
+                        sendBoth(ChatColor.RED + "AI could not find a move.");
+                        return;
+                    }
+                    sendBoth(ChatColor.GRAY + "AI played " + squareName(best.fromX, best.fromY) + "->" + squareName(best.toX, best.toY)
+                            + (best.promotion ? " (promotes to " + best.promotionTo.name().toLowerCase() + ")" : "") + ".");
+                    completeMove(best, best.promotionTo);
+                });
+            });
         }
 
         // Build and open combined view for player
@@ -1175,13 +1191,44 @@ public class ChessPlugin extends JavaPlugin implements Listener {
                20, 30, 10,  0,  0, 10, 30, 20}
         };
         private long nodes;
-        private static final long NODE_LIMIT = 250_000;
+        private long nodeLimit = 250_000;
+        private static final Random RANDOM = new Random();
 
-        ChessMove findBestMove(ChessBoard b, int[] lastDoublePawn, int minutes) {
-            int depth = minutes <= 3 ? 3 : 4;
+        enum Difficulty {
+            EASY("Easy", 1, 0.4, 250, 25_000),
+            CASUAL("Casual", 2, 0.1, 100, 50_000),
+            MEDIUM("Medium", 3, 0.0, 0, 60_000),
+            HARD("Hard", 4, 0.0, 0, 100_000),
+            EXTREME("Extreme", 5, 0.0, 0, 65_000);
+            final String label;
+            final int depth;
+            final double randomness; // chance to play a random legal move
+            final int noise;         // centipawn noise added to each root move score
+            final long nodeLimit;
+            Difficulty(String label, int depth, double randomness, int noise, long nodeLimit) {
+                this.label = label;
+                this.depth = depth;
+                this.randomness = randomness;
+                this.noise = noise;
+                this.nodeLimit = nodeLimit;
+            }
+            static Difficulty fromString(String s) {
+                for (Difficulty d : values()) {
+                    if (d.name().equalsIgnoreCase(s)) return d;
+                }
+                return null;
+            }
+        }
+
+        ChessMove findBestMove(ChessBoard b, int[] lastDoublePawn, Difficulty d) {
+            int depth = d.depth;
+            nodeLimit = d.nodeLimit;
             nodes = 0;
             List<ChessMove> moves = allLegalMoves(b, lastDoublePawn);
             if (moves.isEmpty()) return null;
+            if (d.randomness > 0 && RANDOM.nextDouble() < d.randomness) {
+                return moves.get(RANDOM.nextInt(moves.size()));
+            }
             orderMoves(moves, b);
             int bestScore = -INF;
             List<ChessMove> best = new ArrayList<>();
@@ -1190,6 +1237,7 @@ public class ChessPlugin extends JavaPlugin implements Listener {
                 applyMove(copy, m);
                 int[] nextLdp = m.isDoublePawn ? new int[]{m.toX, m.toY} : null;
                 int score = -alphabeta(copy, depth - 1, -INF, INF, 1, nextLdp);
+                if (d.noise > 0) score += RANDOM.nextInt(2 * d.noise + 1) - d.noise;
                 if (score > bestScore) {
                     bestScore = score;
                     best.clear();
@@ -1199,7 +1247,7 @@ public class ChessPlugin extends JavaPlugin implements Listener {
                 }
             }
             if (best.isEmpty()) return null;
-            return best.get(new Random().nextInt(best.size()));
+            return best.get(RANDOM.nextInt(best.size()));
         }
 
         private int alphabeta(ChessBoard b, int depth, int alpha, int beta, int ply, int[] lastDoublePawn) {
@@ -1210,7 +1258,7 @@ public class ChessPlugin extends JavaPlugin implements Listener {
                 if (b.isKingInCheck(b.whiteToMove ? Color.WHITE : Color.BLACK)) return -(MATE - ply);
                 return 0;
             }
-            if (depth <= 0 || nodes > NODE_LIMIT) return evalFromSide(b);
+            if (depth <= 0 || nodes > nodeLimit) return evalFromSide(b);
             orderMoves(moves, b);
             int best = -INF;
             for (ChessMove m : moves) {
