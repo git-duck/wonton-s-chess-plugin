@@ -4,6 +4,7 @@ import org.bukkit.Bukkit;
 import org.bukkit.ChatColor;
 import org.bukkit.Material;
 import org.bukkit.NamespacedKey;
+import org.bukkit.OfflinePlayer;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandSender;
 import org.bukkit.command.TabExecutor;
@@ -17,8 +18,11 @@ import org.bukkit.inventory.*;
 import org.bukkit.inventory.meta.ItemMeta;
 import org.bukkit.configuration.file.YamlConfiguration;
 import org.bukkit.persistence.PersistentDataType;
+import org.bukkit.plugin.RegisteredServiceProvider;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.bukkit.scheduler.BukkitTask;
+
+import net.milkbowl.vault.economy.Economy;
 
 import java.io.File;
 import java.io.IOException;
@@ -45,14 +49,18 @@ public class ChessPlugin extends JavaPlugin implements Listener {
     public static NamespacedKey PIECE_KEY;
     private ChallengeManager challengeManager;
     private EloManager eloManager;
+    private Economy economy;
     private boolean enabled = true;
     private final Map<UUID, ChessGame> activeGames = new ConcurrentHashMap<>();
+    // spectators: player UUID -> game they are watching
+    private final Map<UUID, ChessGame> spectators = new ConcurrentHashMap<>();
 
     @Override
     public void onEnable() {
         PIECE_KEY = new NamespacedKey(this, "chess_piece");
         this.challengeManager = new ChallengeManager(this);
         this.eloManager = new EloManager(this);
+        setupEconomy();
         getServer().getPluginManager().registerEvents(this, this);
         Objects.requireNonNull(this.getCommand("chess")).setExecutor(new ChessCommand());
         Objects.requireNonNull(this.getCommand("chessaccept")).setExecutor(new ChessAcceptCommand());
@@ -60,7 +68,26 @@ public class ChessPlugin extends JavaPlugin implements Listener {
         Objects.requireNonNull(this.getCommand("chessrating")).setExecutor(new ChessRatingCommand());
         Objects.requireNonNull(this.getCommand("chesstoggle")).setExecutor(new ChessToggleCommand());
         Objects.requireNonNull(this.getCommand("chessai")).setExecutor(new ChessAiCommand());
+        Objects.requireNonNull(this.getCommand("chessspectate")).setExecutor(new ChessSpectateCommand());
         getLogger().info("ChessPlugin enabled");
+    }
+
+    private void setupEconomy() {
+        if (Bukkit.getPluginManager().getPlugin("Vault") == null) {
+            getLogger().warning("Vault not found - currency betting disabled.");
+            return;
+        }
+        RegisteredServiceProvider<Economy> rsp = Bukkit.getServicesManager().getRegistration(Economy.class);
+        if (rsp == null) {
+            getLogger().warning("No economy provider registered via Vault - currency betting disabled.");
+            return;
+        }
+        economy = rsp.getProvider();
+        getLogger().info("Hooked into economy: " + economy.getName());
+    }
+
+    public Economy getEconomy() {
+        return economy;
     }
 
     @Override
@@ -86,12 +113,12 @@ public class ChessPlugin extends JavaPlugin implements Listener {
                 p.sendMessage(ChatColor.RED + "Chess is currently disabled.");
                 return true;
             }
-            if (args.length < 1 || args.length > 2) {
-                p.sendMessage(ChatColor.RED + "Usage: /chess <player> [1|3|5|10] (minutes)");
+            if (args.length < 1 || args.length > 3) {
+                p.sendMessage(ChatColor.RED + "Usage: /chess <player> [1|3|5|10] [bet]");
                 return true;
             }
             int minutes = 3; // default: blitz
-            if (args.length == 2) {
+            if (args.length >= 2) {
                 try {
                     minutes = Integer.parseInt(args[1]);
                 } catch (NumberFormatException ex) {
@@ -100,6 +127,27 @@ public class ChessPlugin extends JavaPlugin implements Listener {
                 }
                 if (minutes != 1 && minutes != 3 && minutes != 5 && minutes != 10) {
                     p.sendMessage(ChatColor.RED + "Invalid time control. Use 1 (bullet), 3 (blitz), 5 (blitz), or 10 (rapid).");
+                    return true;
+                }
+            }
+            double bet = 0;
+            if (args.length == 3) {
+                try {
+                    bet = Double.parseDouble(args[2]);
+                } catch (NumberFormatException ex) {
+                    p.sendMessage(ChatColor.RED + "Invalid bet amount.");
+                    return true;
+                }
+                if (bet <= 0) {
+                    p.sendMessage(ChatColor.RED + "Bet must be a positive number.");
+                    return true;
+                }
+                if (economy == null) {
+                    p.sendMessage(ChatColor.RED + "No economy plugin is installed, so bets are unavailable.");
+                    return true;
+                }
+                if (!economy.has(p, bet)) {
+                    p.sendMessage(ChatColor.RED + "You do not have enough money for that bet. Balance: " + economy.format(economy.getBalance(p)));
                     return true;
                 }
             }
@@ -116,9 +164,14 @@ public class ChessPlugin extends JavaPlugin implements Listener {
                 p.sendMessage(ChatColor.RED + "Either you or the target is already in a game.");
                 return true;
             }
-            challengeManager.createChallenge(p, target, minutes);
-            p.sendMessage(ChatColor.GREEN + "Challenge sent to " + target.getName() + " (" + minutes + " min). Expires in 30s.");
-            target.sendMessage(ChatColor.YELLOW + p.getName() + " has challenged you to a " + minutes + "m chess game! Type " + ChatColor.AQUA + "/chessaccept " + ChatColor.YELLOW + "to accept or " + ChatColor.RED + "/chessdeny" + ChatColor.YELLOW + " to deny.");
+            challengeManager.createChallenge(p, target, minutes, bet);
+            if (bet > 0) {
+                p.sendMessage(ChatColor.GREEN + "Challenge sent to " + target.getName() + " (" + minutes + " min, bet " + economy.format(bet) + "). Expires in 30s.");
+                target.sendMessage(ChatColor.YELLOW + p.getName() + " has challenged you to a " + minutes + "m chess game for " + ChatColor.GOLD + economy.format(bet) + ChatColor.YELLOW + "! Type " + ChatColor.AQUA + "/chessaccept " + ChatColor.YELLOW + "to accept or " + ChatColor.RED + "/chessdeny" + ChatColor.YELLOW + " to deny.");
+            } else {
+                p.sendMessage(ChatColor.GREEN + "Challenge sent to " + target.getName() + " (" + minutes + " min). Expires in 30s.");
+                target.sendMessage(ChatColor.YELLOW + p.getName() + " has challenged you to a " + minutes + "m chess game! Type " + ChatColor.AQUA + "/chessaccept " + ChatColor.YELLOW + "to accept or " + ChatColor.RED + "/chessdeny" + ChatColor.YELLOW + " to deny.");
+            }
             return true;
         }
 
@@ -156,7 +209,28 @@ public class ChessPlugin extends JavaPlugin implements Listener {
                 accepter.sendMessage(ChatColor.RED + "Challenger is no longer online.");
                 return true;
             }
+            double bet = challenge.bet;
+            if (bet > 0) {
+                if (economy == null) {
+                    accepter.sendMessage(ChatColor.RED + "The economy is unavailable; the bet cannot be placed.");
+                    challenger.sendMessage(ChatColor.RED + "The challenge was cancelled because the economy is unavailable.");
+                    return true;
+                }
+                if (!economy.has(challenger, bet)) {
+                    accepter.sendMessage(ChatColor.RED + "The challenger no longer has enough money to cover the bet.");
+                    challenger.sendMessage(ChatColor.RED + "You cannot afford the " + economy.format(bet) + " bet.");
+                    return true;
+                }
+                if (!economy.has(accepter, bet)) {
+                    accepter.sendMessage(ChatColor.RED + "You do not have enough money to cover the " + economy.format(bet) + " bet.");
+                    challenger.sendMessage(ChatColor.RED + accepter.getName() + " could not afford the bet and the challenge was cancelled.");
+                    return true;
+                }
+                economy.withdrawPlayer(challenger, bet);
+                economy.withdrawPlayer(accepter, bet);
+            }
             ChessGame game = new ChessGame(ChessPlugin.this, challenger, accepter, challenge.minutes);
+            game.bet = bet;
             activeGames.put(challenger.getUniqueId(), game);
             activeGames.put(accepter.getUniqueId(), game);
             game.start();
@@ -318,6 +392,57 @@ public class ChessPlugin extends JavaPlugin implements Listener {
         }
     }
 
+    private class ChessSpectateCommand implements TabExecutor {
+        @Override
+        public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
+            if (!(sender instanceof Player)) {
+                sender.sendMessage("Players only.");
+                return true;
+            }
+            Player p = (Player) sender;
+            if (!enabled) {
+                p.sendMessage(ChatColor.RED + "Chess is currently disabled.");
+                return true;
+            }
+            if (args.length != 1) {
+                p.sendMessage(ChatColor.RED + "Usage: /chessspectate <player>");
+                return true;
+            }
+            if (activeGames.containsKey(p.getUniqueId())) {
+                p.sendMessage(ChatColor.RED + "You are already in a game.");
+                return true;
+            }
+            if (spectators.containsKey(p.getUniqueId())) {
+                p.sendMessage(ChatColor.RED + "You are already spectating a game. Close its board first.");
+                return true;
+            }
+            Player target = Bukkit.getPlayerExact(args[0]);
+            if (target == null || !target.isOnline()) {
+                p.sendMessage(ChatColor.RED + "Player not found or offline.");
+                return true;
+            }
+            ChessGame g = activeGames.get(target.getUniqueId());
+            if (g == null) {
+                p.sendMessage(ChatColor.RED + target.getName() + " is not in a chess game.");
+                return true;
+            }
+            g.addSpectator(p);
+            return true;
+        }
+
+        @Override
+        public List<String> onTabComplete(CommandSender sender, Command command, String alias, String[] args) {
+            if (args.length == 1) {
+                String prefix = args[0].toLowerCase();
+                return Bukkit.getOnlinePlayers().stream()
+                        .map(Player::getName)
+                        .filter(n -> n.toLowerCase().startsWith(prefix))
+                        .collect(Collectors.toList());
+            }
+            return Collections.emptyList();
+        }
+    }
+
     // Events ------------------------------------------------------------------
 
     @EventHandler
@@ -326,10 +451,17 @@ public class ChessPlugin extends JavaPlugin implements Listener {
         if (!(he instanceof Player)) return;
         Player p = (Player) he;
         ChessGame g = activeGames.get(p.getUniqueId());
-        if (g == null) return;
-        // delegate to game; always cancel so no items are moved in board area
-        e.setCancelled(true);
-        g.onInventoryClick(p, e);
+        if (g != null) {
+            // delegate to game; always cancel so no items are moved in board area
+            e.setCancelled(true);
+            g.onInventoryClick(p, e);
+            return;
+        }
+        ChessGame sg = spectators.get(p.getUniqueId());
+        if (sg != null) {
+            e.setCancelled(true);
+            sg.handleSpectatorClick(p, e);
+        }
     }
 
     @EventHandler
@@ -341,6 +473,10 @@ public class ChessPlugin extends JavaPlugin implements Listener {
         if (g != null) {
             g.onClose(p);
         }
+        ChessGame sg = spectators.get(p.getUniqueId());
+        if (sg != null) {
+            sg.removeSpectator(p);
+        }
     }
 
     @EventHandler
@@ -349,6 +485,10 @@ public class ChessPlugin extends JavaPlugin implements Listener {
         ChessGame g = activeGames.get(p.getUniqueId());
         if (g != null) {
             g.onPlayerQuit(p);
+        }
+        ChessGame sg = spectators.get(p.getUniqueId());
+        if (sg != null) {
+            sg.removeSpectator(p);
         }
     }
 
@@ -381,8 +521,8 @@ public class ChessPlugin extends JavaPlugin implements Listener {
             }, 20L, 20L);
         }
 
-        void createChallenge(Player challenger, Player target, int minutes) {
-            pending.put(target.getUniqueId(), new Challenge(challenger.getUniqueId(), System.currentTimeMillis() + 30_000L, minutes));
+        void createChallenge(Player challenger, Player target, int minutes, double bet) {
+            pending.put(target.getUniqueId(), new Challenge(challenger.getUniqueId(), System.currentTimeMillis() + 30_000L, minutes, bet));
         }
 
         Challenge acceptChallenge(Player target) {
@@ -399,7 +539,8 @@ public class ChessPlugin extends JavaPlugin implements Listener {
             final UUID challenger;
             final long expiresAt;
             final int minutes;
-            Challenge(UUID challenger, long expiresAt, int minutes) { this.challenger = challenger; this.expiresAt = expiresAt; this.minutes = minutes; }
+            final double bet;
+            Challenge(UUID challenger, long expiresAt, int minutes, double bet) { this.challenger = challenger; this.expiresAt = expiresAt; this.minutes = minutes; this.bet = bet; }
         }
     }
 
@@ -539,6 +680,11 @@ public class ChessPlugin extends JavaPlugin implements Listener {
         boolean blackIsAI = false;
         boolean aiThinking = false;
         ChessAI.Difficulty aiDifficulty = ChessAI.Difficulty.MEDIUM;
+        // currency bet (each player's stake; winner takes both) - 0 = no bet
+        double bet = 0;
+        // spectators watching this game (player UUID -> player)
+        final Map<UUID, Player> spectators = new ConcurrentHashMap<>();
+        String spectatorTitle = null;
 
         ChessGame(ChessPlugin plugin, Player white, Player black, int minutes) {
             this.plugin = plugin;
@@ -571,6 +717,9 @@ public class ChessPlugin extends JavaPlugin implements Listener {
             timerTask = plugin.getServer().getScheduler().runTaskTimer(plugin, this::tick, 20L, 20L);
             String cat = categoryFor(minutes);
             sendBoth(ChatColor.GREEN + "Game started! " + timeControlName() + " (" + minutes + "m).");
+            if (bet > 0 && plugin.getEconomy() != null) {
+                sendBoth(ChatColor.GOLD + "Bet: " + plugin.getEconomy().format(bet) + " each. Winner takes all.");
+            }
             if (whiteIsAI || blackIsAI) {
                 sendBoth(ChatColor.GRAY + "You are " + (whiteIsAI ? "Black" : "White") + " vs AI (" + aiDifficulty.label + "). Ratings are not affected.");
             } else {
@@ -607,6 +756,12 @@ public class ChessPlugin extends JavaPlugin implements Listener {
             if (result != GameResult.ABANDONED) {
                 applyElo(result);
             }
+            resolveBet(result);
+            // kick spectators out (closes their boards -> triggers removeSpectator via close event)
+            for (Player sp : new ArrayList<>(spectators.values())) {
+                if (sp.isOnline()) sp.closeInventory();
+                removeSpectator(sp);
+            }
             // close GUIs (will trigger onClose -> restore)
             for (Player p : Arrays.asList(white, black)) {
                 if (p.isOnline()) p.closeInventory();
@@ -618,6 +773,28 @@ public class ChessPlugin extends JavaPlugin implements Listener {
                 saved.remove(id);
             }
             plugin.removeGame(this);
+        }
+
+        void resolveBet(GameResult result) {
+            if (bet <= 0) return;
+            Economy econ = plugin.getEconomy();
+            if (econ == null) {
+                plugin.getLogger().warning("Cannot settle chess bet of " + bet + ": economy unavailable.");
+                return;
+            }
+            OfflinePlayer ow = Bukkit.getOfflinePlayer(white.getUniqueId());
+            OfflinePlayer ob = Bukkit.getOfflinePlayer(black.getUniqueId());
+            if (result == GameResult.WHITE_WIN) {
+                econ.depositPlayer(ow, bet * 2);
+                sendBoth(ChatColor.GOLD + "Bet settled: " + econ.format(bet * 2) + " paid to " + sideName(true) + ".");
+            } else if (result == GameResult.BLACK_WIN) {
+                econ.depositPlayer(ob, bet * 2);
+                sendBoth(ChatColor.GOLD + "Bet settled: " + econ.format(bet * 2) + " paid to " + sideName(false) + ".");
+            } else {
+                econ.depositPlayer(ow, bet);
+                econ.depositPlayer(ob, bet);
+                sendBoth(ChatColor.GRAY + "Bet refunded: " + econ.format(bet) + " each.");
+            }
         }
 
         void applyElo(GameResult result) {
@@ -715,13 +892,18 @@ public class ChessPlugin extends JavaPlugin implements Listener {
 
         // Build and open combined view for player
         void openFor(Player p) {
+            openView(p, title, false);
+        }
+
+        // Build and open combined view for a player or spectator (read-only board, own controls)
+        void openView(Player p, String viewTitle, boolean spectator) {
             if (!p.isOnline()) return;
             // Save current inventory if we haven't already
             if (!saved.containsKey(p.getUniqueId())) {
                 saved.put(p.getUniqueId(), SavedInventory.save(p));
             }
             // Build top inventory (54)
-            Inventory inv = Bukkit.createInventory(null, 54, title);
+            Inventory inv = Bukkit.createInventory(null, 54, viewTitle);
             // fill top 4 ranks into chest top:
             // top area: guiRow 0..3, col 0..7 -> boardRow = guiRow, boardCol = col
             for (int guiRow = 0; guiRow < 4; guiRow++) {
@@ -733,10 +915,10 @@ public class ChessPlugin extends JavaPlugin implements Listener {
                 // control column at col 8
                 int ctrlSlot = guiRow * 9 + 8;
                 String text;
-                if (guiRow == 0) text = ChatColor.AQUA + "White: " + formatTime(whiteTime);
-                else if (guiRow == 1) text = ChatColor.AQUA + "Black: " + formatTime(blackTime);
+                if (guiRow == 0) text = ChatColor.AQUA + "White: " + (spectator ? sideName(true) : formatTime(whiteTime));
+                else if (guiRow == 1) text = ChatColor.AQUA + "Black: " + (spectator ? sideName(false) : formatTime(blackTime));
                 else if (guiRow == 2) text = ChatColor.YELLOW + "Turn: " + (board.whiteToMove ? "White" : "Black");
-                else text = ChatColor.GRAY + "" + minutes + "m " + timeControlName();
+                else text = spectator ? ChatColor.GRAY + "Spectating" : ChatColor.GRAY + "" + minutes + "m " + timeControlName();
                 ItemStack info = new ItemStack(Material.PAPER);
                 ItemMeta meta = info.getItemMeta();
                 meta.setDisplayName(text);
@@ -745,10 +927,15 @@ public class ChessPlugin extends JavaPlugin implements Listener {
             }
             // bottom chest row: controls
             inv.setItem(45, createButton(Material.ARROW, ChatColor.GREEN + "Flip"));
-            inv.setItem(46, createButton(Material.BARRIER, ChatColor.RED + "Resign"));
-            inv.setItem(47, createButton(Material.CLOCK, ChatColor.GOLD + "Time"));
-            inv.setItem(51, createButton(Material.PAPER, ChatColor.AQUA + "Info"));
-            inv.setItem(53, createButton(Material.OAK_SIGN, ChatColor.GRAY + "Close"));
+            if (spectator) {
+                inv.setItem(51, createButton(Material.PAPER, ChatColor.AQUA + "Info"));
+                inv.setItem(53, createButton(Material.OAK_SIGN, ChatColor.GRAY + "Close"));
+            } else {
+                inv.setItem(46, createButton(Material.BARRIER, ChatColor.RED + "Resign"));
+                inv.setItem(47, createButton(Material.CLOCK, ChatColor.GOLD + "Time"));
+                inv.setItem(51, createButton(Material.PAPER, ChatColor.AQUA + "Info"));
+                inv.setItem(53, createButton(Material.OAK_SIGN, ChatColor.GRAY + "Close"));
+            }
 
             // Apply bottom 4 ranks into player's own visible inventory slots:
             // bottomRow 0..3 maps to board rows 4..7
@@ -780,6 +967,54 @@ public class ChessPlugin extends JavaPlugin implements Listener {
 
             // Finally open the chest for the player
             p.openInventory(inv);
+        }
+
+        // Spectators ----------------------------------------------------------
+
+        void addSpectator(Player p) {
+            if (!running) return;
+            if (spectators.containsKey(p.getUniqueId())) return;
+            String base = "Spectating: " + sideName(true) + " vs " + sideName(false);
+            if (base.length() > 30) base = base.substring(0, 30);
+            spectatorTitle = ChatColor.DARK_AQUA + base;
+            spectators.put(p.getUniqueId(), p);
+            plugin.spectators.put(p.getUniqueId(), this);
+            openView(p, spectatorTitle, true);
+            p.sendMessage(ChatColor.AQUA + "You are now spectating " + sideName(true) + " vs " + sideName(false)
+                    + (bet > 0 && plugin.getEconomy() != null ? " (bet " + plugin.getEconomy().format(bet) + ")" : "") + ".");
+            p.sendMessage(ChatColor.GRAY + "Close the board to stop spectating.");
+        }
+
+        void removeSpectator(Player p) {
+            if (!spectators.containsKey(p.getUniqueId()) && !plugin.spectators.containsKey(p.getUniqueId())) return;
+            spectators.remove(p.getUniqueId());
+            plugin.spectators.remove(p.getUniqueId());
+            SavedInventory s = saved.remove(p.getUniqueId());
+            if (s != null && p.isOnline()) s.restore(p);
+            p.sendMessage(ChatColor.GRAY + "You are no longer spectating.");
+        }
+
+        void handleSpectatorClick(Player p, InventoryClickEvent e) {
+            int raw = e.getRawSlot();
+            if (raw >= 45 && raw <= 53) {
+                ItemStack cur = e.getCurrentItem();
+                if (cur == null || !cur.hasItemMeta()) return;
+                String name = ChatColor.stripColor(cur.getItemMeta().getDisplayName());
+                switch (name) {
+                    case "Flip":
+                        openView(p, spectatorTitle, true);
+                        return;
+                    case "Info":
+                        p.sendMessage(ChatColor.GRAY + "Spectating " + sideName(true) + " vs " + sideName(false)
+                                + " | " + formatTime(whiteTime) + " - " + formatTime(blackTime)
+                                + (bet > 0 && plugin.getEconomy() != null ? " | Bet: " + plugin.getEconomy().format(bet) : ""));
+                        return;
+                    case "Close":
+                        p.closeInventory();
+                        return;
+                }
+            }
+            // all other clicks on the spectator board are ignored (event already cancelled)
         }
 
         private ItemStack createButton(Material mat, String name) {
@@ -1052,6 +1287,10 @@ public class ChessPlugin extends JavaPlugin implements Listener {
             // Refresh all human players
             if (!whiteIsAI) refreshPlayer(white);
             if (!blackIsAI) refreshPlayer(black);
+            // Refresh spectators
+            for (Player sp : spectators.values()) {
+                refreshSpectator(sp);
+            }
         }
 
         private void refreshPlayer(Player p) {
@@ -1063,42 +1302,57 @@ public class ChessPlugin extends JavaPlugin implements Listener {
             Inventory top = iv.getTopInventory();
             if (top == null) return;
             if (iv.getTitle().equals(title)) {
-                    // re-apply top area and player's mapped slots
-                    // top:
-                    for (int guiRow = 0; guiRow < 4; guiRow++) {
-                        for (int guiCol = 0; guiCol < 8; guiCol++) {
-                            int slot = guiRow * 9 + guiCol;
-                            ChessPiece piece = board.getPiece(guiRow, guiCol);
-                            top.setItem(slot, toItemFor(piece));
-                        }
-                        int ctrlSlot = guiRow * 9 + 8;
-                        ItemStack info = top.getItem(ctrlSlot);
-                        if (info != null && info.hasItemMeta()) {
-                            // update time/turn text
-                            ItemMeta meta = info.getItemMeta();
-                            String text;
-                            if (guiRow == 0) text = ChatColor.AQUA + "White: " + formatTime(whiteTime);
-                            else if (guiRow == 1) text = ChatColor.AQUA + "Black: " + formatTime(blackTime);
-                            else if (guiRow == 2) text = ChatColor.YELLOW + "Turn: " + (board.whiteToMove ? "White" : "Black");
-                            else text = ChatColor.GRAY + "" + minutes + "m " + timeControlName();
-                            meta.setDisplayName(text);
-                            info.setItemMeta(meta);
-                            top.setItem(ctrlSlot, info);
-                        }
-                    }
-                    // bottom mapped slots in player's inventory:
-                    PlayerInventory pinv = p.getInventory();
-                    for (int br = 0; br < 4; br++) {
-                        int boardRow = 4 + br;
-                        for (int col = 0; col < 8; col++) {
-                            ItemStack item = toItemFor(board.getPiece(boardRow, col));
-                            int invIndex;
-                            if (br == 3) invIndex = col; // hotbar 0..7
-                            else invIndex = 9 + br * 9 + col; // br 0->9..16, br1->18..25, br2->27..34
-                            pinv.setItem(invIndex, item);
-                        }
-                    }
+                renderBoardInto(top, p);
+            }
+        }
+
+        private void refreshSpectator(Player p) {
+            if (p == null || !p.isOnline()) return;
+            InventoryView iv = p.getOpenInventory();
+            if (iv == null) return;
+            Inventory top = iv.getTopInventory();
+            if (top == null) return;
+            if (spectatorTitle != null && iv.getTitle().equals(spectatorTitle)) {
+                renderBoardInto(top, p);
+            }
+        }
+
+        // Re-apply the board to the top chest and the player's mapped inventory slots
+        private void renderBoardInto(Inventory top, Player p) {
+            // top area
+            for (int guiRow = 0; guiRow < 4; guiRow++) {
+                for (int guiCol = 0; guiCol < 8; guiCol++) {
+                    int slot = guiRow * 9 + guiCol;
+                    ChessPiece piece = board.getPiece(guiRow, guiCol);
+                    top.setItem(slot, toItemFor(piece));
                 }
+                int ctrlSlot = guiRow * 9 + 8;
+                ItemStack info = top.getItem(ctrlSlot);
+                if (info != null && info.hasItemMeta()) {
+                    // update time/turn text
+                    ItemMeta meta = info.getItemMeta();
+                    String text;
+                    if (guiRow == 0) text = ChatColor.AQUA + "White: " + formatTime(whiteTime);
+                    else if (guiRow == 1) text = ChatColor.AQUA + "Black: " + formatTime(blackTime);
+                    else if (guiRow == 2) text = ChatColor.YELLOW + "Turn: " + (board.whiteToMove ? "White" : "Black");
+                    else text = ChatColor.GRAY + "" + minutes + "m " + timeControlName();
+                    meta.setDisplayName(text);
+                    info.setItemMeta(meta);
+                    top.setItem(ctrlSlot, info);
+                }
+            }
+            // bottom mapped slots in player's inventory:
+            PlayerInventory pinv = p.getInventory();
+            for (int br = 0; br < 4; br++) {
+                int boardRow = 4 + br;
+                for (int col = 0; col < 8; col++) {
+                    ItemStack item = toItemFor(board.getPiece(boardRow, col));
+                    int invIndex;
+                    if (br == 3) invIndex = col; // hotbar 0..7
+                    else invIndex = 9 + br * 9 + col; // br 0->9..16, br1->18..25, br2->27..34
+                    pinv.setItem(invIndex, item);
+                }
+            }
         }
     }
 
@@ -1192,6 +1446,8 @@ public class ChessPlugin extends JavaPlugin implements Listener {
         };
         private long nodes;
         private long nodeLimit = 250_000;
+        // score of the best root move from the last findBestMove call (used for puzzle move validation)
+        public int lastBestScore = 0;
         private static final Random RANDOM = new Random();
 
         enum Difficulty {
@@ -1227,6 +1483,7 @@ public class ChessPlugin extends JavaPlugin implements Listener {
             List<ChessMove> moves = allLegalMoves(b, lastDoublePawn);
             if (moves.isEmpty()) return null;
             if (d.randomness > 0 && RANDOM.nextDouble() < d.randomness) {
+                lastBestScore = 0;
                 return moves.get(RANDOM.nextInt(moves.size()));
             }
             orderMoves(moves, b);
@@ -1247,7 +1504,21 @@ public class ChessPlugin extends JavaPlugin implements Listener {
                 }
             }
             if (best.isEmpty()) return null;
+            lastBestScore = bestScore;
             return best.get(RANDOM.nextInt(best.size()));
+        }
+
+        // Score a specific root move from the current side's perspective (deterministic, no noise).
+        int scoreForMove(ChessBoard b, int[] lastDoublePawn, ChessMove m, ChessPieceType promo, Difficulty d) {
+            nodeLimit = d.nodeLimit;
+            nodes = 0;
+            ChessBoard copy = b.copy();
+            applyMove(copy, m);
+            if (m.promotion && promo != null) {
+                copy.setPiece(m.toX, m.toY, new ChessPiece(m.promotionColor, promo, m.toX, m.toY));
+            }
+            int[] nextLdp = m.isDoublePawn ? new int[]{m.toX, m.toY} : null;
+            return -alphabeta(copy, d.depth - 1, -INF, INF, 1, nextLdp);
         }
 
         private int alphabeta(ChessBoard b, int depth, int alpha, int beta, int ply, int[] lastDoublePawn) {
