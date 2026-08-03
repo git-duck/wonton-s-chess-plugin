@@ -10,7 +10,7 @@ And also make it so that pawns don't auto promote to queens.
 
 * **[wonton_stew](https://github.com)** — *Original Creator*
   Up to this point ITS ALL ME. ALL ME.
-* **[MrFrenchGuy23](https://github.com)** — 
+* **[MrFrenchGuy23](https://github.com/MrFrenchGuy23)** — 
   He hasn't done anything yet, I just invited him. Finally locked in, he's debugging some stuff. HE LOCKED IN A LOT. He added blitz rapid and bullet, and elo! he's gonna add AI soon too.
 
   For eeveesun and git-duck (yes i know, im not git-duck im wonton_stew thats why they just all say wonton's [etc]) they just kinda threw some ideas around such as rapid and bullet, eeveesun attempted to modify AoPS's alcumus formula to apply here, but we ended up using MrFrenchGuy23's, but they are mainly working on other plugins we started.
