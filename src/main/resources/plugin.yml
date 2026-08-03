@@ -32,6 +32,10 @@ commands:
     description: Spectate an ongoing chess game: /chessspectate <player>
     usage: /chessspectate <player>
     permission: chess.use
+  chesspuzzle:
+    description: Play today's daily puzzle (mate in one): /chesspuzzle
+    usage: /chesspuzzle
+    permission: chess.use
 permissions:
   chess.use:
     description: Allows using the chess commands

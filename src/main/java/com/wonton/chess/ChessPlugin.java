@@ -26,6 +26,8 @@ import net.milkbowl.vault.economy.Economy;
 
 import java.io.File;
 import java.io.IOException;
+import java.time.LocalDate;
+import java.time.ZoneOffset;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
@@ -69,6 +71,7 @@ public class ChessPlugin extends JavaPlugin implements Listener {
         Objects.requireNonNull(this.getCommand("chesstoggle")).setExecutor(new ChessToggleCommand());
         Objects.requireNonNull(this.getCommand("chessai")).setExecutor(new ChessAiCommand());
         Objects.requireNonNull(this.getCommand("chessspectate")).setExecutor(new ChessSpectateCommand());
+        Objects.requireNonNull(this.getCommand("chesspuzzle")).setExecutor(new ChessPuzzleCommand());
         getLogger().info("ChessPlugin enabled");
     }
 
@@ -443,6 +446,47 @@ public class ChessPlugin extends JavaPlugin implements Listener {
         }
     }
 
+    private class ChessPuzzleCommand implements TabExecutor {
+        @Override
+        public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
+            if (!(sender instanceof Player)) {
+                sender.sendMessage("Players only.");
+                return true;
+            }
+            Player p = (Player) sender;
+            if (!enabled) {
+                p.sendMessage(ChatColor.RED + "Chess is currently disabled.");
+                return true;
+            }
+            if (args.length > 1) {
+                p.sendMessage(ChatColor.RED + "Usage: /chesspuzzle");
+                return true;
+            }
+            if (activeGames.containsKey(p.getUniqueId())) {
+                p.sendMessage(ChatColor.RED + "You are already in a game. Close your current board first.");
+                return true;
+            }
+            Puzzle puzzle = Puzzle.today();
+            ChessGame game = new ChessGame(ChessPlugin.this, p, p, 10);
+            game.puzzleMode = true;
+            game.humanIsWhite = puzzle.whiteToMove;
+            game.whiteIsAI = !puzzle.whiteToMove;
+            game.blackIsAI = puzzle.whiteToMove;
+            game.puzzleDay = puzzle.day;
+            game.puzzleTitle = puzzle.title;
+            game.puzzleSolution = puzzle.solution;
+            game.board.setPosition(puzzle.pieces, puzzle.whiteToMove);
+            activeGames.put(p.getUniqueId(), game);
+            game.start();
+            return true;
+        }
+
+        @Override
+        public List<String> onTabComplete(CommandSender sender, Command command, String alias, String[] args) {
+            return Collections.emptyList();
+        }
+    }
+
     // Events ------------------------------------------------------------------
 
     @EventHandler
@@ -650,6 +694,45 @@ public class ChessPlugin extends JavaPlugin implements Listener {
         }
     }
 
+    // Daily puzzles: classic mate-in-one motifs (pool rotates by calendar day)
+    static class Puzzle {
+        final String title;
+        final boolean whiteToMove;
+        final String solution;
+        final String[] pieces; // entries like "WKg1" = color + type + square
+        int day = 0; // index into the pool, assigned by today()
+
+        Puzzle(String title, boolean whiteToMove, String solution, String[] pieces) {
+            this.title = title;
+            this.whiteToMove = whiteToMove;
+            this.solution = solution;
+            this.pieces = pieces;
+        }
+
+        static final List<Puzzle> PUZZLES = Arrays.asList(
+            new Puzzle("Smothered Mate", true, "Nf7#", new String[]{"WKg1", "WNg5", "BKh8", "BRg8", "BPg7", "BPh7"}),
+            new Puzzle("Back-Rank Queen", true, "Qd8#", new String[]{"WKg1", "WQd1", "BKg8", "BPf7", "BPg7", "BPh7"}),
+            new Puzzle("Back-Rank Rook", true, "Re8#", new String[]{"WKg1", "WRe1", "BKg8", "BPf7", "BPg7", "BPh7"}),
+            new Puzzle("Corridor Rook", true, "Rb8#", new String[]{"WKg1", "WRb1", "BKg8", "BPf7", "BPg7", "BPh7"}),
+            new Puzzle("Cornered Queen", true, "Qd8#", new String[]{"WKg1", "WQd3", "BKh8", "BPf7", "BPg7", "BPh7"}),
+            new Puzzle("Cornered Rook", true, "Rb8#", new String[]{"WKg1", "WRb1", "BKh8", "BPf7", "BPg7", "BPh7"}),
+            new Puzzle("Forked Queen", true, "Qe8#", new String[]{"WKg1", "WQe2", "WBc4", "WNf3", "BKg8", "BPf7", "BPg7", "BPh7"}),
+            new Puzzle("Knight Escort", true, "Qe8#", new String[]{"WKg1", "WQe1", "WNf3", "BKg8", "BPf7", "BPg7", "BPh7"}),
+            new Puzzle("Long Diagonal", true, "Qa8#", new String[]{"WKg1", "WQf3", "WBc4", "BKg8", "BPf7", "BPg7", "BPh7"}),
+            new Puzzle("Arabian Mate", true, "Rd8#", new String[]{"WKg1", "WRd1", "WNf6", "BKh8", "BPg7", "BPh7"}),
+            new Puzzle("Smothered Mate (Black)", false, "Nf7#", new String[]{"BKg1", "BNg5", "WKh8", "WRg8", "WPg7", "WPh7"}),
+            new Puzzle("Back-Rank Queen (Black)", false, "Qd1#", new String[]{"WKg1", "WPf2", "WPg2", "WPh2", "BKg8", "BQd8"})
+        );
+
+        static Puzzle today() {
+            long epochDay = LocalDate.now(ZoneOffset.UTC).toEpochDay();
+            int idx = (int) Math.floorMod(epochDay, PUZZLES.size());
+            Puzzle p = PUZZLES.get(idx);
+            p.day = idx;
+            return p;
+        }
+    }
+
     // Chess game (engine + combined inventory GUI) ----------------------------
 
     static class ChessGame {
@@ -685,6 +768,13 @@ public class ChessPlugin extends JavaPlugin implements Listener {
         // spectators watching this game (player UUID -> player)
         final Map<UUID, Player> spectators = new ConcurrentHashMap<>();
         String spectatorTitle = null;
+        // daily puzzle mode (mate in one)
+        boolean puzzleMode = false;
+        boolean humanIsWhite = true;
+        int puzzleDay = 0;
+        String puzzleTitle = "";
+        String puzzleSolution = "";
+        int puzzleAttempts = 0;
 
         ChessGame(ChessPlugin plugin, Player white, Player black, int minutes) {
             this.plugin = plugin;
@@ -710,6 +800,15 @@ public class ChessPlugin extends JavaPlugin implements Listener {
         }
 
         void start() {
+            if (puzzleMode) {
+                // board already set by the puzzle command; no clock, ratings, or AI
+                running = true;
+                openFor(white);
+                sendBoth(ChatColor.LIGHT_PURPLE + "Daily Puzzle #" + (puzzleDay + 1) + ": " + puzzleTitle + " - find mate in one!");
+                sendBoth(ChatColor.GRAY + "You play " + (humanIsWhite ? "White" : "Black") + ". Wrong moves are not played. 'Hint' reveals the solution.");
+                updateAllInventories();
+                return;
+            }
             board.resetInitialPosition();
             running = true;
             if (!whiteIsAI) openFor(white);
@@ -731,6 +830,7 @@ public class ChessPlugin extends JavaPlugin implements Listener {
 
         void tick() {
             if (!running) return;
+            if (puzzleMode) return;
             if (board.whiteToMove) {
                 whiteTime--;
                 if (whiteTime <= 0) endGame(sideName(false) + " wins on time", GameResult.BLACK_WIN);
@@ -823,6 +923,10 @@ public class ChessPlugin extends JavaPlugin implements Listener {
 
         void onPlayerQuit(Player p) {
             if (!running) return;
+            if (puzzleMode) {
+                endGame("You left the daily puzzle.", GameResult.ABANDONED);
+                return;
+            }
             if (p.getUniqueId().equals(white.getUniqueId())) {
                 endGame(sideName(false) + " wins (opponent disconnected)", GameResult.BLACK_WIN);
             } else {
@@ -831,6 +935,11 @@ public class ChessPlugin extends JavaPlugin implements Listener {
         }
 
         void onClose(Player p) {
+            // closing a puzzle board counts as giving up (prevents orphaned games)
+            if (puzzleMode && running) {
+                giveUpPuzzle(p);
+                return;
+            }
             // discard any pending promotion if the promoting player leaves the view
             if (pendingPromotion != null && promotionPlayer != null && promotionPlayer.equals(p.getUniqueId())) {
                 pendingPromotion = null;
@@ -892,7 +1001,13 @@ public class ChessPlugin extends JavaPlugin implements Listener {
 
         // Build and open combined view for player
         void openFor(Player p) {
-            openView(p, title, false);
+            openView(p, viewTitle(), false);
+        }
+
+        // GUI title for the current view (puzzles use their own header)
+        String viewTitle() {
+            if (puzzleMode) return ChatColor.LIGHT_PURPLE + "Daily Puzzle #" + (puzzleDay + 1);
+            return title;
         }
 
         // Build and open combined view for a player or spectator (read-only board, own controls)
@@ -914,20 +1029,16 @@ public class ChessPlugin extends JavaPlugin implements Listener {
                 }
                 // control column at col 8
                 int ctrlSlot = guiRow * 9 + 8;
-                String text;
-                if (guiRow == 0) text = ChatColor.AQUA + "White: " + (spectator ? sideName(true) : formatTime(whiteTime));
-                else if (guiRow == 1) text = ChatColor.AQUA + "Black: " + (spectator ? sideName(false) : formatTime(blackTime));
-                else if (guiRow == 2) text = ChatColor.YELLOW + "Turn: " + (board.whiteToMove ? "White" : "Black");
-                else text = spectator ? ChatColor.GRAY + "Spectating" : ChatColor.GRAY + "" + minutes + "m " + timeControlName();
-                ItemStack info = new ItemStack(Material.PAPER);
-                ItemMeta meta = info.getItemMeta();
-                meta.setDisplayName(text);
-                info.setItemMeta(meta);
-                inv.setItem(ctrlSlot, info);
+                inv.setItem(ctrlSlot, createInfo(infoText(guiRow, spectator)));
             }
             // bottom chest row: controls
             inv.setItem(45, createButton(Material.ARROW, ChatColor.GREEN + "Flip"));
             if (spectator) {
+                inv.setItem(51, createButton(Material.PAPER, ChatColor.AQUA + "Info"));
+                inv.setItem(53, createButton(Material.OAK_SIGN, ChatColor.GRAY + "Close"));
+            } else if (puzzleMode) {
+                inv.setItem(46, createButton(Material.BARRIER, ChatColor.RED + "Give Up"));
+                inv.setItem(47, createButton(Material.CLOCK, ChatColor.GOLD + "Hint"));
                 inv.setItem(51, createButton(Material.PAPER, ChatColor.AQUA + "Info"));
                 inv.setItem(53, createButton(Material.OAK_SIGN, ChatColor.GRAY + "Close"));
             } else {
@@ -1025,6 +1136,27 @@ public class ChessPlugin extends JavaPlugin implements Listener {
             return it;
         }
 
+        private ItemStack createInfo(String text) {
+            ItemStack info = new ItemStack(Material.PAPER);
+            ItemMeta meta = info.getItemMeta();
+            meta.setDisplayName(text);
+            info.setItemMeta(meta);
+            return info;
+        }
+
+        private String infoText(int guiRow, boolean spectator) {
+            if (puzzleMode) {
+                if (guiRow == 0) return ChatColor.LIGHT_PURPLE + "Daily Puzzle #" + (puzzleDay + 1);
+                if (guiRow == 1) return ChatColor.AQUA + puzzleTitle;
+                if (guiRow == 2) return ChatColor.YELLOW + "Turn: " + (board.whiteToMove ? "White" : "Black");
+                return ChatColor.GRAY + "Mate in 1 | Tries: " + puzzleAttempts;
+            }
+            if (guiRow == 0) return ChatColor.AQUA + "White: " + (spectator ? sideName(true) : formatTime(whiteTime));
+            if (guiRow == 1) return ChatColor.AQUA + "Black: " + (spectator ? sideName(false) : formatTime(blackTime));
+            if (guiRow == 2) return ChatColor.YELLOW + "Turn: " + (board.whiteToMove ? "White" : "Black");
+            return spectator ? ChatColor.GRAY + "Spectating" : ChatColor.GRAY + "" + minutes + "m " + timeControlName();
+        }
+
         private String formatTime(int secs) {
             int m = secs / 60;
             int s = secs % 60;
@@ -1086,6 +1218,12 @@ public class ChessPlugin extends JavaPlugin implements Listener {
                         case "Flip":
                             // flip view by restoring and reopening (simpler: just reopen)
                             openFor(p);
+                            return;
+                        case "Give Up":
+                            giveUpPuzzle(p);
+                            return;
+                        case "Hint":
+                            p.sendMessage(ChatColor.AQUA + "Hint: play " + puzzleSolution + ".");
                             return;
                         case "Resign":
                             boolean whiteSide = p.getUniqueId().equals(white.getUniqueId());
@@ -1206,6 +1344,10 @@ public class ChessPlugin extends JavaPlugin implements Listener {
                     showPromotionChoices(player);
                     return;
                 }
+                if (puzzleMode) {
+                    handlePuzzleMove(player, move, null);
+                    return;
+                }
                 completeMove(move, null);
             }
         }
@@ -1251,7 +1393,40 @@ public class ChessPlugin extends JavaPlugin implements Listener {
             if (move == null) return;
             pendingPromotion = null;
             promotionPlayer = null;
+            if (puzzleMode) {
+                handlePuzzleMove(p, move, type);
+                return;
+            }
             completeMove(move, type);
+        }
+
+        // Daily puzzle: only a move that checkmates the opponent is accepted.
+        void handlePuzzleMove(Player p, ChessMove move, ChessPieceType promo) {
+            ChessBoard copy = board.copy();
+            copy.applyMove(move);
+            if (move.promotion && promo != null) {
+                copy.setPiece(move.toX, move.toY, new ChessPiece(move.promotionColor, promo, move.toX, move.toY));
+            }
+            copy.whiteToMove = !copy.whiteToMove;
+            int[] nextLdp = move.isDoublePawn ? new int[]{move.toX, move.toY} : null;
+            if (!copy.isInCheckmate(copy.whiteToMove, nextLdp)) {
+                puzzleAttempts++;
+                selectedPlayer = null; selectedX = -1; selectedY = -1;
+                p.sendMessage(ChatColor.RED + "That is not mate in one! Try again. (Attempt " + puzzleAttempts + ")");
+                updateAllInventories();
+                return;
+            }
+            p.sendMessage(ChatColor.GREEN + "Checkmate! You solved today's puzzle"
+                    + (puzzleAttempts == 0 ? " on the first try" : " in " + (puzzleAttempts + 1) + " attempts") + "!");
+            p.sendMessage(ChatColor.GRAY + "Solution: " + squareName(move.fromX, move.fromY) + "->" + squareName(move.toX, move.toY)
+                    + (move.promotion ? " (" + promo.name().toLowerCase() + ")" : "") + ".");
+            completeMove(move, promo);
+        }
+
+        void giveUpPuzzle(Player p) {
+            if (!running) return;
+            sendBoth(ChatColor.GRAY + "Solution: " + puzzleSolution + ". Come back tomorrow for a new one!");
+            endGame("You gave up on today's puzzle.", GameResult.ABANDONED);
         }
 
         void completeMove(ChessMove move, ChessPieceType promotionTo) {
@@ -1265,6 +1440,10 @@ public class ChessPlugin extends JavaPlugin implements Listener {
             selectedPlayer = null; selectedX = -1; selectedY = -1;
             updateAllInventories();
             if (board.isInCheckmate(board.whiteToMove, lastDoublePawn)) {
+                if (puzzleMode) {
+                    endGame("You solved today's puzzle!", humanIsWhite ? GameResult.WHITE_WIN : GameResult.BLACK_WIN);
+                    return;
+                }
                 Color winner = board.whiteToMove ? Color.BLACK : Color.WHITE;
                 endGame((board.whiteToMove ? "White" : "Black") + " is checkmated. " + sideName(!board.whiteToMove) + " wins.",
                         winner == Color.WHITE ? GameResult.WHITE_WIN : GameResult.BLACK_WIN);
@@ -1301,8 +1480,8 @@ public class ChessPlugin extends JavaPlugin implements Listener {
             if (iv == null) return;
             Inventory top = iv.getTopInventory();
             if (top == null) return;
-            if (iv.getTitle().equals(title)) {
-                renderBoardInto(top, p);
+            if (iv.getTitle().equals(viewTitle())) {
+                renderBoardInto(top, p, false);
             }
         }
 
@@ -1313,12 +1492,12 @@ public class ChessPlugin extends JavaPlugin implements Listener {
             Inventory top = iv.getTopInventory();
             if (top == null) return;
             if (spectatorTitle != null && iv.getTitle().equals(spectatorTitle)) {
-                renderBoardInto(top, p);
+                renderBoardInto(top, p, true);
             }
         }
 
         // Re-apply the board to the top chest and the player's mapped inventory slots
-        private void renderBoardInto(Inventory top, Player p) {
+        private void renderBoardInto(Inventory top, Player p, boolean spectator) {
             // top area
             for (int guiRow = 0; guiRow < 4; guiRow++) {
                 for (int guiCol = 0; guiCol < 8; guiCol++) {
@@ -1331,12 +1510,7 @@ public class ChessPlugin extends JavaPlugin implements Listener {
                 if (info != null && info.hasItemMeta()) {
                     // update time/turn text
                     ItemMeta meta = info.getItemMeta();
-                    String text;
-                    if (guiRow == 0) text = ChatColor.AQUA + "White: " + formatTime(whiteTime);
-                    else if (guiRow == 1) text = ChatColor.AQUA + "Black: " + formatTime(blackTime);
-                    else if (guiRow == 2) text = ChatColor.YELLOW + "Turn: " + (board.whiteToMove ? "White" : "Black");
-                    else text = ChatColor.GRAY + "" + minutes + "m " + timeControlName();
-                    meta.setDisplayName(text);
+                    meta.setDisplayName(infoText(guiRow, spectator));
                     info.setItemMeta(meta);
                     top.setItem(ctrlSlot, info);
                 }
@@ -1664,6 +1838,31 @@ public class ChessPlugin extends JavaPlugin implements Listener {
             setPiece(0,4,new ChessPiece(Color.WHITE,ChessPieceType.KING,0,4));
             setPiece(7,4,new ChessPiece(Color.BLACK,ChessPieceType.KING,7,4));
             whiteToMove = true;
+        }
+
+        // Load a position from definitions like "WKg1" (color + type + square).
+        // Kings and rooks are marked as moved so castling is never available.
+        void setPosition(String[] defs, boolean whiteToMove) {
+            for (int x = 0; x < 8; x++) for (int y = 0; y < 8; y++) b[x][y] = null;
+            for (String d : defs) {
+                char col = d.charAt(0);
+                char typ = d.charAt(1);
+                int file = d.charAt(2) - 'a';
+                int rank = d.charAt(3) - '1';
+                ChessPieceType t;
+                switch (typ) {
+                    case 'P': t = ChessPieceType.PAWN; break;
+                    case 'R': t = ChessPieceType.ROOK; break;
+                    case 'N': t = ChessPieceType.KNIGHT; break;
+                    case 'B': t = ChessPieceType.BISHOP; break;
+                    case 'Q': t = ChessPieceType.QUEEN; break;
+                    default:  t = ChessPieceType.KING; break;
+                }
+                ChessPiece p = new ChessPiece(col == 'W' ? Color.WHITE : Color.BLACK, t, rank, file);
+                if (t == ChessPieceType.KING || t == ChessPieceType.ROOK) p.hasMoved = true;
+                setPiece(rank, file, p);
+            }
+            this.whiteToMove = whiteToMove;
         }
 
         List<ChessMove> legalMoves(int x, int y, int[] lastDoublePawn) {
