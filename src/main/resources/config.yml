@@ -1,0 +1,39 @@
+# Chess plugin configuration
+
+win-reward:
+  enabled: true
+  amount: 100.0
+  ai-games: false
+
+puzzle:
+  streak-bonus-days: 7
+  streak-bonus: 50.0
+
+gambit:
+  double-multiplier: 2.0
+  max-multiplier: 16.0
+
+titles:
+  - threshold: 800
+    name: "Novice"
+  - threshold: 1000
+    name: "Amateur"
+  - threshold: 1200
+    name: "Club Player"
+  - threshold: 1400
+    name: "Expert"
+  - threshold: 1600
+    name: "Candidate Master"
+  - threshold: 1800
+    name: "Master"
+  - threshold: 2000
+    name: "International Master"
+  - threshold: 2400
+    name: "Grandmaster"
+
+matchmaking:
+  rating-band: 200
+  default-time: 3
+
+replay:
+  max-games: 20

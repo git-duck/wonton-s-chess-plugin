@@ -1,0 +1,30 @@
+# Custom daily puzzles.
+#
+# Each entry is appended to the built-in puzzle pool and participates in the
+# daily rotation (which puzzle is "today's" puzzle). A custom puzzle must be a
+# legal position (neither king in check) whose solution can be replayed to
+# checkmate; invalid entries are skipped at load time and reported in the log.
+#
+# Fields:
+#   title         - display name shown when the puzzle starts
+#   white-to-move - true if White (the solver) moves first, false for Black
+#   solution      - space-separated SAN moves, alternating solver/opponent,
+#                   ending in checkmate (e.g. "Qg8+ Rxg8 Nf7#")
+#   pieces        - list of pieces as "COLORTYPESQUARE" tokens, e.g. "WKg1"
+#                   (white king g1), "BNh6" (black knight h6)
+#
+# After editing this file, run /chesspuzzle reload (requires chess.admin).
+custom-puzzles: []
+# Example (copy this block into the list to enable it):
+# custom-puzzles:
+#   - title: "Example Smother"
+#     white-to-move: true
+#     solution: "Qg8+ Rxg8 Nf7#"
+#     pieces:
+#       - "WKg1"
+#       - "WQd5"
+#       - "WNh6"
+#       - "BKh8"
+#       - "BRf8"
+#       - "BPg7"
+#       - "BPh7"

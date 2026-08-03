@@ -5,8 +5,8 @@ api-version: 1.20
 softdepend: [Vault]
 commands:
   chess:
-    description: Send a chess challenge: /chess <player>
-    usage: /chess <player>
+    description: Send a chess challenge: /chess <player> [1|3|5|10[+inc]] [bet] [gambit]
+    usage: /chess <player> [1|3|5|10[+inc]] [bet] [gambit]
     permission: chess.use
   chessaccept:
     description: Accept a chess challenge
@@ -33,8 +33,28 @@ commands:
     usage: /chessspectate <player>
     permission: chess.use
   chesspuzzle:
-    description: Play today's daily puzzle (mate in one): /chesspuzzle
-    usage: /chesspuzzle
+    description: Play today's daily puzzle (mate in one/two/three): /chesspuzzle
+    usage: /chesspuzzle [list|reload|play <index>]
+    permission: chess.use
+  chessboard:
+    description: Reopen your chess board view
+    usage: /chessboard
+    permission: chess.use
+  chessmatch:
+    description: Join or leave the matchmaking queue: /chessmatch [bullet|blitz|rapid]
+    usage: /chessmatch [bullet|blitz|rapid]
+    permission: chess.use
+  chessleaderboard:
+    description: Show the top chess players: /chessleaderboard [bullet|blitz|rapid]
+    usage: /chessleaderboard [bullet|blitz|rapid]
+    permission: chess.use
+  chessreplay:
+    description: Show recent games or replay one: /chessreplay [index] [player]
+    usage: /chessreplay [index] [player]
+    permission: chess.use
+  chesstourney:
+    description: Create, join, and run a tournament: /chesstourney [create|join|leave|start|end|status]
+    usage: /chesstourney [create|join|leave|start|end|status]
     permission: chess.use
 permissions:
   chess.use:

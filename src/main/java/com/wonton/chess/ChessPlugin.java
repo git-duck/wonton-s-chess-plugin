@@ -5,6 +5,7 @@ import org.bukkit.ChatColor;
 import org.bukkit.Material;
 import org.bukkit.NamespacedKey;
 import org.bukkit.OfflinePlayer;
+import org.bukkit.Sound;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandSender;
 import org.bukkit.command.TabExecutor;
@@ -17,6 +18,7 @@ import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.inventory.*;
 import org.bukkit.inventory.meta.ItemMeta;
 import org.bukkit.configuration.file.YamlConfiguration;
+import org.bukkit.enchantments.Enchantment;
 import org.bukkit.persistence.PersistentDataType;
 import org.bukkit.plugin.RegisteredServiceProvider;
 import org.bukkit.plugin.java.JavaPlugin;
@@ -25,11 +27,13 @@ import org.bukkit.scheduler.BukkitTask;
 import net.milkbowl.vault.economy.Economy;
 
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.IOException;
 import java.time.LocalDate;
 import java.time.ZoneOffset;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.logging.Logger;
 import java.util.stream.Collectors;
 
 /**
@@ -51,17 +55,27 @@ public class ChessPlugin extends JavaPlugin implements Listener {
     public static NamespacedKey PIECE_KEY;
     private ChallengeManager challengeManager;
     private EloManager eloManager;
+    private StatsManager statsManager;
     private Economy economy;
     private boolean enabled = true;
     private final Map<UUID, ChessGame> activeGames = new ConcurrentHashMap<>();
     // spectators: player UUID -> game they are watching
     private final Map<UUID, ChessGame> spectators = new ConcurrentHashMap<>();
+    // matchmaking queue, replay archive, and tournament manager
+    private MatchmakingManager matchmaking;
+    private ReplayManager replayManager;
+    private final TournamentManager tournament = new TournamentManager();
 
     @Override
     public void onEnable() {
         PIECE_KEY = new NamespacedKey(this, "chess_piece");
+        saveDefaultConfig();
+        saveResource("puzzles.yml", false);
         this.challengeManager = new ChallengeManager(this);
         this.eloManager = new EloManager(this);
+        this.statsManager = new StatsManager(this);
+        this.replayManager = new ReplayManager(this);
+        this.matchmaking = new MatchmakingManager(this);
         setupEconomy();
         getServer().getPluginManager().registerEvents(this, this);
         Objects.requireNonNull(this.getCommand("chess")).setExecutor(new ChessCommand());
@@ -72,6 +86,12 @@ public class ChessPlugin extends JavaPlugin implements Listener {
         Objects.requireNonNull(this.getCommand("chessai")).setExecutor(new ChessAiCommand());
         Objects.requireNonNull(this.getCommand("chessspectate")).setExecutor(new ChessSpectateCommand());
         Objects.requireNonNull(this.getCommand("chesspuzzle")).setExecutor(new ChessPuzzleCommand());
+        Objects.requireNonNull(this.getCommand("chessboard")).setExecutor(new ChessBoardCommand());
+        Objects.requireNonNull(this.getCommand("chessmatch")).setExecutor(new ChessMatchCommand());
+        Objects.requireNonNull(this.getCommand("chessleaderboard")).setExecutor(new ChessLeaderboardCommand());
+        Objects.requireNonNull(this.getCommand("chessreplay")).setExecutor(new ChessReplayCommand());
+        Objects.requireNonNull(this.getCommand("chesstourney")).setExecutor(new ChessTourneyCommand());
+        Puzzle.loadCustom(this);
         getLogger().info("ChessPlugin enabled");
     }
 
@@ -93,9 +113,16 @@ public class ChessPlugin extends JavaPlugin implements Listener {
         return economy;
     }
 
+    public StatsManager getStatsManager() {
+        return statsManager;
+    }
+
     @Override
     public void onDisable() {
         if (eloManager != null) eloManager.save();
+        if (statsManager != null) statsManager.save();
+        // cancel any tournament first so its onEnd hooks don't fire during shutdown
+        tournament.end(this);
         // End games (this closes inventories -> triggers restoration on close)
         for (ChessGame g : new ArrayList<>(activeGames.values())) {
             g.endGame("Server shutting down");
@@ -116,25 +143,33 @@ public class ChessPlugin extends JavaPlugin implements Listener {
                 p.sendMessage(ChatColor.RED + "Chess is currently disabled.");
                 return true;
             }
-            if (args.length < 1 || args.length > 3) {
-                p.sendMessage(ChatColor.RED + "Usage: /chess <player> [1|3|5|10] [bet]");
+            if (args.length < 1 || args.length > 4) {
+                p.sendMessage(ChatColor.RED + "Usage: /chess <player> [1|3|5|10[+inc]] [bet] [gambit]");
                 return true;
             }
             int minutes = 3; // default: blitz
+            int increment = 0;
             if (args.length >= 2) {
+                String[] parts = args[1].split("\\+");
                 try {
-                    minutes = Integer.parseInt(args[1]);
+                    minutes = Integer.parseInt(parts[0]);
+                    if (parts.length > 1) increment = Integer.parseInt(parts[1]);
                 } catch (NumberFormatException ex) {
-                    p.sendMessage(ChatColor.RED + "Invalid time control. Use 1 (bullet), 3 (blitz), 5 (blitz), or 10 (rapid).");
+                    p.sendMessage(ChatColor.RED + "Invalid time control. Use 1 (bullet), 3 (blitz), 5 (blitz), or 10 (rapid), optionally +inc (e.g. 3+2).");
                     return true;
                 }
                 if (minutes != 1 && minutes != 3 && minutes != 5 && minutes != 10) {
                     p.sendMessage(ChatColor.RED + "Invalid time control. Use 1 (bullet), 3 (blitz), 5 (blitz), or 10 (rapid).");
                     return true;
                 }
+                if (increment < 0 || increment > 60) {
+                    p.sendMessage(ChatColor.RED + "Invalid increment. Use 0-60 seconds.");
+                    return true;
+                }
             }
             double bet = 0;
-            if (args.length == 3) {
+            boolean gambit = false;
+            if (args.length >= 3) {
                 try {
                     bet = Double.parseDouble(args[2]);
                 } catch (NumberFormatException ex) {
@@ -154,6 +189,17 @@ public class ChessPlugin extends JavaPlugin implements Listener {
                     return true;
                 }
             }
+            if (args.length == 4) {
+                gambit = args[3].equalsIgnoreCase("gambit");
+                if (!gambit) {
+                    p.sendMessage(ChatColor.RED + "Invalid option '" + args[3] + "'. Use 'gambit' to enable gambit mode.");
+                    return true;
+                }
+                if (bet <= 0) {
+                    p.sendMessage(ChatColor.RED + "Gambit mode requires a bet.");
+                    return true;
+                }
+            }
             Player target = Bukkit.getPlayerExact(args[0]);
             if (target == null || !target.isOnline()) {
                 p.sendMessage(ChatColor.RED + "Player not found or offline.");
@@ -167,13 +213,16 @@ public class ChessPlugin extends JavaPlugin implements Listener {
                 p.sendMessage(ChatColor.RED + "Either you or the target is already in a game.");
                 return true;
             }
-            challengeManager.createChallenge(p, target, minutes, bet);
+            challengeManager.createChallenge(p, target, minutes, bet, increment, gambit);
+            String tc = minutes + (increment > 0 ? "+" + increment : "");
             if (bet > 0) {
-                p.sendMessage(ChatColor.GREEN + "Challenge sent to " + target.getName() + " (" + minutes + " min, bet " + economy.format(bet) + "). Expires in 30s.");
-                target.sendMessage(ChatColor.YELLOW + p.getName() + " has challenged you to a " + minutes + "m chess game for " + ChatColor.GOLD + economy.format(bet) + ChatColor.YELLOW + "! Type " + ChatColor.AQUA + "/chessaccept " + ChatColor.YELLOW + "to accept or " + ChatColor.RED + "/chessdeny" + ChatColor.YELLOW + " to deny.");
+                p.sendMessage(ChatColor.GREEN + "Challenge sent to " + target.getName() + " (" + tc + "m, bet " + economy.format(bet) + (gambit ? ", gambit" : "") + "). Expires in 30s.");
+                target.sendMessage(ChatColor.YELLOW + p.getName() + " has challenged you to a " + tc + "m chess game for " + ChatColor.GOLD + economy.format(bet)
+                        + (gambit ? ChatColor.LIGHT_PURPLE + " with gambit mode" : "")
+                        + ChatColor.YELLOW + "! Type " + ChatColor.AQUA + "/chessaccept " + ChatColor.YELLOW + "to accept or " + ChatColor.RED + "/chessdeny" + ChatColor.YELLOW + " to deny.");
             } else {
-                p.sendMessage(ChatColor.GREEN + "Challenge sent to " + target.getName() + " (" + minutes + " min). Expires in 30s.");
-                target.sendMessage(ChatColor.YELLOW + p.getName() + " has challenged you to a " + minutes + "m chess game! Type " + ChatColor.AQUA + "/chessaccept " + ChatColor.YELLOW + "to accept or " + ChatColor.RED + "/chessdeny" + ChatColor.YELLOW + " to deny.");
+                p.sendMessage(ChatColor.GREEN + "Challenge sent to " + target.getName() + " (" + tc + " min). Expires in 30s.");
+                target.sendMessage(ChatColor.YELLOW + p.getName() + " has challenged you to a " + tc + "m chess game! Type " + ChatColor.AQUA + "/chessaccept " + ChatColor.YELLOW + "to accept or " + ChatColor.RED + "/chessdeny" + ChatColor.YELLOW + " to deny.");
             }
             return true;
         }
@@ -188,7 +237,13 @@ public class ChessPlugin extends JavaPlugin implements Listener {
                         .collect(Collectors.toList());
             }
             if (args.length == 2) {
-                return Arrays.asList("1", "3", "5", "10");
+                return Arrays.asList("1", "1+1", "3", "3+2", "5", "5+5", "10");
+            }
+            if (args.length == 3) {
+                return Collections.singletonList("0");
+            }
+            if (args.length == 4) {
+                return Collections.singletonList("gambit");
             }
             return Collections.emptyList();
         }
@@ -232,8 +287,9 @@ public class ChessPlugin extends JavaPlugin implements Listener {
                 economy.withdrawPlayer(challenger, bet);
                 economy.withdrawPlayer(accepter, bet);
             }
-            ChessGame game = new ChessGame(ChessPlugin.this, challenger, accepter, challenge.minutes);
+            ChessGame game = new ChessGame(ChessPlugin.this, challenger, accepter, challenge.minutes, challenge.increment);
             game.bet = bet;
+            game.gambit = challenge.gambit;
             activeGames.put(challenger.getUniqueId(), game);
             activeGames.put(accepter.getUniqueId(), game);
             game.start();
@@ -458,15 +514,51 @@ public class ChessPlugin extends JavaPlugin implements Listener {
                 p.sendMessage(ChatColor.RED + "Chess is currently disabled.");
                 return true;
             }
-            if (args.length > 1) {
-                p.sendMessage(ChatColor.RED + "Usage: /chesspuzzle");
+            if (args.length == 0) {
+                startPuzzle(p, Puzzle.today());
                 return true;
             }
+            if (args.length == 1 && args[0].equalsIgnoreCase("list")) {
+                List<Puzzle> pool = Puzzle.allPuzzles();
+                p.sendMessage(ChatColor.GOLD + "Puzzles (" + pool.size() + "):");
+                for (int i = 0; i < pool.size(); i++) {
+                    Puzzle pz = pool.get(i);
+                    p.sendMessage(ChatColor.GRAY + "  " + (i + 1) + ". " + pz.title + " - mate in " + pz.mateIn());
+                }
+                return true;
+            }
+            if (args.length == 1 && args[0].equalsIgnoreCase("reload")) {
+                if (!p.hasPermission("chess.admin")) {
+                    p.sendMessage(ChatColor.RED + "You don't have permission to reload puzzles.");
+                    return true;
+                }
+                Puzzle.loadCustom(ChessPlugin.this);
+                p.sendMessage(ChatColor.GREEN + "Custom puzzles reloaded (" + Puzzle.CUSTOM_PUZZLES.size() + " loaded, " + (Puzzle.allPuzzles().size() - Puzzle.PUZZLES.size()) + " total).");
+                return true;
+            }
+            if (args.length == 2 && args[0].equalsIgnoreCase("play")) {
+                try {
+                    Puzzle pz = Puzzle.byIndex(Integer.parseInt(args[1]));
+                    if (pz == null) {
+                        p.sendMessage(ChatColor.RED + "No puzzle at index " + args[1] + ".");
+                        return true;
+                    }
+                    startPuzzle(p, pz);
+                    return true;
+                } catch (NumberFormatException ex) {
+                    p.sendMessage(ChatColor.RED + "Usage: /chesspuzzle play <index>");
+                    return true;
+                }
+            }
+            p.sendMessage(ChatColor.RED + "Usage: /chesspuzzle [list|reload|play <index>]");
+            return true;
+        }
+
+        void startPuzzle(Player p, Puzzle puzzle) {
             if (activeGames.containsKey(p.getUniqueId())) {
                 p.sendMessage(ChatColor.RED + "You are already in a game. Close your current board first.");
-                return true;
+                return;
             }
-            Puzzle puzzle = Puzzle.today();
             ChessGame game = new ChessGame(ChessPlugin.this, p, p, 10);
             game.puzzleMode = true;
             game.humanIsWhite = puzzle.whiteToMove;
@@ -475,14 +567,309 @@ public class ChessPlugin extends JavaPlugin implements Listener {
             game.puzzleDay = puzzle.day;
             game.puzzleTitle = puzzle.title;
             game.puzzleSolution = puzzle.solution;
+            game.puzzleSolutionMoves = puzzle.solutionMoves();
+            game.puzzleMateIn = puzzle.mateIn();
             game.board.setPosition(puzzle.pieces, puzzle.whiteToMove);
             activeGames.put(p.getUniqueId(), game);
             game.start();
+        }
+
+        @Override
+        public List<String> onTabComplete(CommandSender sender, Command command, String alias, String[] args) {
+            if (args.length == 1) {
+                return Arrays.asList("list", "reload", "play");
+            }
+            if (args.length == 2 && args[0].equalsIgnoreCase("play")) {
+                List<String> out = new ArrayList<>();
+                for (int i = 1; i <= Puzzle.allPuzzles().size(); i++) out.add(String.valueOf(i));
+                return out;
+            }
+            return Collections.emptyList();
+        }
+    }
+
+    private class ChessBoardCommand implements TabExecutor {
+        @Override
+        public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
+            if (!(sender instanceof Player)) {
+                sender.sendMessage("Players only.");
+                return true;
+            }
+            Player p = (Player) sender;
+            if (!enabled) {
+                p.sendMessage(ChatColor.RED + "Chess is currently disabled.");
+                return true;
+            }
+            ChessGame game = activeGames.get(p.getUniqueId());
+            if (game == null) {
+                p.sendMessage(ChatColor.RED + "You are not in a chess game.");
+                return true;
+            }
+            game.openFor(p);
+            p.sendMessage(ChatColor.GREEN + "Your chess board has been reopened.");
             return true;
         }
 
         @Override
         public List<String> onTabComplete(CommandSender sender, Command command, String alias, String[] args) {
+            return Collections.emptyList();
+        }
+    }
+
+    private class ChessMatchCommand implements TabExecutor {
+        @Override
+        public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
+            if (!(sender instanceof Player)) {
+                sender.sendMessage("Players only.");
+                return true;
+            }
+            Player p = (Player) sender;
+            if (!enabled) {
+                p.sendMessage(ChatColor.RED + "Chess is currently disabled.");
+                return true;
+            }
+            String cat = args.length >= 1 ? args[0].toLowerCase() : "blitz";
+            if (!cat.equals("bullet") && !cat.equals("blitz") && !cat.equals("rapid")) {
+                p.sendMessage(ChatColor.RED + "Invalid category. Use bullet, blitz, or rapid.");
+                return true;
+            }
+            if (activeGames.containsKey(p.getUniqueId())) {
+                p.sendMessage(ChatColor.RED + "You cannot queue while in a game.");
+                return true;
+            }
+            if (matchmaking.toggle(p, cat)) {
+                p.sendMessage(ChatColor.GREEN + "You joined the " + cat + " matchmaking queue. Type /chessmatch " + cat + " again to leave.");
+            } else {
+                p.sendMessage(ChatColor.YELLOW + "You left the " + cat + " matchmaking queue.");
+            }
+            return true;
+        }
+
+        @Override
+        public List<String> onTabComplete(CommandSender sender, Command command, String alias, String[] args) {
+            return args.length == 1 ? Arrays.asList("bullet", "blitz", "rapid") : Collections.emptyList();
+        }
+    }
+
+    private class ChessLeaderboardCommand implements TabExecutor {
+        @Override
+        public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
+            String cat = args.length >= 1 ? args[0].toLowerCase() : "blitz";
+            if (!cat.equals("bullet") && !cat.equals("blitz") && !cat.equals("rapid")) {
+                sender.sendMessage(ChatColor.RED + "Invalid category. Use bullet, blitz, or rapid.");
+                return true;
+            }
+            List<EloManager.LeaderEntry> top = eloManager.top(cat, 10);
+            sender.sendMessage(ChatColor.GOLD + "=== Chess " + cat + " leaderboard (top " + top.size() + ") ===");
+            int rank = 1;
+            for (EloManager.LeaderEntry e : top) {
+                OfflinePlayer op = Bukkit.getOfflinePlayer(e.uuid);
+                String name = op.getName() != null ? op.getName() : "Unknown";
+                String title = eloManager.titleFor(e.rating);
+                sender.sendMessage(ChatColor.GRAY + "  " + rank + ". " + ChatColor.WHITE + name
+                        + ChatColor.GRAY + " - " + ChatColor.GOLD + e.rating
+                        + (title != null ? ChatColor.DARK_AQUA + " [" + title + "]" : "")
+                        + ChatColor.GRAY + " (" + e.games + " games)");
+                rank++;
+            }
+            return true;
+        }
+
+        @Override
+        public List<String> onTabComplete(CommandSender sender, Command command, String alias, String[] args) {
+            return args.length == 1 ? Arrays.asList("bullet", "blitz", "rapid") : Collections.emptyList();
+        }
+    }
+
+    private class ChessReplayCommand implements TabExecutor {
+        @Override
+        public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
+            if (args.length == 0) {
+                sender.sendMessage(ChatColor.GOLD + "=== Recent games ===");
+                int shown = 0;
+                for (int i = 0; i < replayManager.games.size() && shown < 10; i++) {
+                    ReplayManager.RecordedGame rg = replayManager.games.get(i);
+                    sender.sendMessage(ChatColor.GRAY + "  " + (i + 1) + ". " + ChatColor.WHITE + rg.white + " vs " + rg.black
+                            + ChatColor.GRAY + " | " + ReplayManager.resultText(rg.result)
+                            + ChatColor.GRAY + " | " + rg.minutes + "m | " + rg.moves.size() + " moves | /chessreplay " + (i + 1));
+                    shown++;
+                }
+                if (replayManager.games.isEmpty()) {
+                    sender.sendMessage(ChatColor.GRAY + "  No games recorded yet.");
+                }
+                return true;
+            }
+            if (args.length == 1) {
+                try {
+                    int idx = Integer.parseInt(args[0]);
+                    if (idx < 1 || idx > replayManager.games.size()) {
+                        sender.sendMessage(ChatColor.RED + "No replay at index " + idx + ".");
+                        return true;
+                    }
+                    ReplayManager.RecordedGame rg = replayManager.games.get(idx - 1);
+                    sender.sendMessage(ChatColor.GOLD + "Game #" + idx + ": " + rg.white + " vs " + rg.black
+                            + " (" + rg.minutes + "m) - " + ReplayManager.resultText(rg.result));
+                    StringBuilder sb = new StringBuilder();
+                    int moveNo = 1;
+                    for (int i = 0; i < rg.moves.size(); i += 2) {
+                        if (sb.length() > 0) sb.append("  ");
+                        sb.append(ChatColor.GRAY).append(moveNo).append(". ");
+                        sb.append(ChatColor.WHITE).append(rg.moves.get(i));
+                        if (i + 1 < rg.moves.size()) sb.append(" ").append(rg.moves.get(i + 1));
+                        if (moveNo % 8 == 0) {
+                            sender.sendMessage(sb.toString());
+                            sb.setLength(0);
+                        }
+                        moveNo++;
+                    }
+                    if (sb.length() > 0) sender.sendMessage(sb.toString());
+                    return true;
+                } catch (NumberFormatException ex) {
+                    // treat as player name filter
+                }
+                String who = args[0];
+                sender.sendMessage(ChatColor.GOLD + "=== Games involving " + who + " ===");
+                int shown = 0;
+                for (int i = 0; i < replayManager.games.size() && shown < 10; i++) {
+                    ReplayManager.RecordedGame rg = replayManager.games.get(i);
+                    if (!rg.white.equalsIgnoreCase(who) && !rg.black.equalsIgnoreCase(who)) continue;
+                    sender.sendMessage(ChatColor.GRAY + "  " + (i + 1) + ". " + ChatColor.WHITE + rg.white + " vs " + rg.black
+                            + ChatColor.GRAY + " | " + ReplayManager.resultText(rg.result)
+                            + ChatColor.GRAY + " | " + rg.minutes + "m | /chessreplay " + (i + 1));
+                    shown++;
+                }
+                if (shown == 0) {
+                    sender.sendMessage(ChatColor.GRAY + "  No games found for " + who + ".");
+                }
+                return true;
+            }
+            sender.sendMessage(ChatColor.RED + "Usage: /chessreplay [index] [player]");
+            return true;
+        }
+
+        @Override
+        public List<String> onTabComplete(CommandSender sender, Command command, String alias, String[] args) {
+            if (args.length == 1) {
+                return Bukkit.getOnlinePlayers().stream().map(Player::getName).collect(Collectors.toList());
+            }
+            return Collections.emptyList();
+        }
+    }
+
+    private class ChessTourneyCommand implements TabExecutor {
+        @Override
+        public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
+            if (!(sender instanceof Player)) {
+                sender.sendMessage("Players only.");
+                return true;
+            }
+            Player p = (Player) sender;
+            if (!enabled) {
+                p.sendMessage(ChatColor.RED + "Chess is currently disabled.");
+                return true;
+            }
+            String sub = args.length >= 1 ? args[0].toLowerCase() : "status";
+            switch (sub) {
+                case "create": {
+                    if (!p.hasPermission("chess.admin")) {
+                        p.sendMessage(ChatColor.RED + "You don't have permission to create tournaments.");
+                        return true;
+                    }
+                    if (tournament.state != TournamentManager.State.NONE) {
+                        p.sendMessage(ChatColor.RED + "A tournament or lobby is already in progress.");
+                        return true;
+                    }
+                    tournament.state = TournamentManager.State.LOBBY;
+                    tournament.creator = p.getUniqueId();
+                    p.sendMessage(ChatColor.GREEN + "Tournament lobby created! Players join with /chesstourney join. Start with /chesstourney start (needs 4 or 8).");
+                    return true;
+                }
+                case "join": {
+                    if (!tournament.lobbyOpen()) {
+                        p.sendMessage(ChatColor.RED + "No tournament lobby is open.");
+                        return true;
+                    }
+                    if (activeGames.containsKey(p.getUniqueId())) {
+                        p.sendMessage(ChatColor.RED + "You cannot join while in a game.");
+                        return true;
+                    }
+                    if (tournament.players.contains(p.getUniqueId())) {
+                        p.sendMessage(ChatColor.RED + "You already joined the tournament.");
+                        return true;
+                    }
+                    tournament.players.add(p.getUniqueId());
+                    p.sendMessage(ChatColor.GREEN + "You joined the tournament (" + tournament.players.size() + " player" + (tournament.players.size() == 1 ? "" : "s") + " so far).");
+                    return true;
+                }
+                case "leave": {
+                    if (!tournament.players.remove(p.getUniqueId())) {
+                        p.sendMessage(ChatColor.RED + "You are not in the tournament lobby.");
+                        return true;
+                    }
+                    p.sendMessage(ChatColor.YELLOW + "You left the tournament lobby.");
+                    return true;
+                }
+                case "start": {
+                    if (!p.hasPermission("chess.admin")) {
+                        p.sendMessage(ChatColor.RED + "You don't have permission to start tournaments.");
+                        return true;
+                    }
+                    if (tournament.start(ChessPlugin.this)) {
+                        p.sendMessage(ChatColor.GREEN + "Tournament started!");
+                    } else {
+                        p.sendMessage(ChatColor.RED + "Cannot start: the tournament needs exactly 4 or 8 players in the lobby.");
+                    }
+                    return true;
+                }
+                case "end": {
+                    if (!p.hasPermission("chess.admin")) {
+                        p.sendMessage(ChatColor.RED + "You don't have permission to end tournaments.");
+                        return true;
+                    }
+                    if (tournament.state == TournamentManager.State.NONE) {
+                        p.sendMessage(ChatColor.RED + "No tournament or lobby to end.");
+                        return true;
+                    }
+                    tournament.end(ChessPlugin.this);
+                    p.sendMessage(ChatColor.GREEN + "Tournament ended.");
+                    return true;
+                }
+                case "status":
+                default: {
+                    StringBuilder sb = new StringBuilder();
+                    sb.append(ChatColor.GOLD).append("=== Chess tournament ===");
+                    if (tournament.state == TournamentManager.State.NONE) {
+                        sb.append("\n").append(ChatColor.GRAY).append("  No tournament in progress.");
+                        if (p.hasPermission("chess.admin")) {
+                            sb.append("\n").append(ChatColor.GRAY).append("  Admin: /chesstourney create");
+                        }
+                    } else if (tournament.state == TournamentManager.State.LOBBY) {
+                        sb.append("\n").append(ChatColor.GREEN).append("  Lobby open (").append(tournament.players.size()).append(" player").append(tournament.players.size() == 1 ? "" : "s").append(", need 4 or 8).");
+                        for (UUID id : tournament.players) {
+                            Player pl = Bukkit.getPlayer(id);
+                            sb.append("\n").append(ChatColor.GRAY).append("    - ").append(pl != null ? pl.getName() : "?");
+                        }
+                    } else {
+                        sb.append("\n").append(ChatColor.GREEN).append("  Running - round ").append(tournament.round);
+                        for (TournamentManager.Match m : tournament.matches) {
+                            Player w = Bukkit.getPlayer(m.white);
+                            Player b = Bukkit.getPlayer(m.black);
+                            sb.append("\n").append(ChatColor.GRAY).append("    ").append(w != null ? w.getName() : "?")
+                                    .append(" vs ").append(b != null ? b.getName() : "?")
+                                    .append(m.resolved ? ChatColor.GOLD + " - finished" : ChatColor.GREEN + " - playing");
+                        }
+                    }
+                    p.sendMessage(sb.toString());
+                    return true;
+                }
+            }
+        }
+
+        @Override
+        public List<String> onTabComplete(CommandSender sender, Command command, String alias, String[] args) {
+            if (args.length == 1) {
+                return Arrays.asList("create", "join", "leave", "start", "end", "status");
+            }
             return Collections.emptyList();
         }
     }
@@ -565,8 +952,8 @@ public class ChessPlugin extends JavaPlugin implements Listener {
             }, 20L, 20L);
         }
 
-        void createChallenge(Player challenger, Player target, int minutes, double bet) {
-            pending.put(target.getUniqueId(), new Challenge(challenger.getUniqueId(), System.currentTimeMillis() + 30_000L, minutes, bet));
+        void createChallenge(Player challenger, Player target, int minutes, double bet, int increment, boolean gambit) {
+            pending.put(target.getUniqueId(), new Challenge(challenger.getUniqueId(), System.currentTimeMillis() + 30_000L, minutes, bet, increment, gambit));
         }
 
         Challenge acceptChallenge(Player target) {
@@ -584,7 +971,16 @@ public class ChessPlugin extends JavaPlugin implements Listener {
             final long expiresAt;
             final int minutes;
             final double bet;
-            Challenge(UUID challenger, long expiresAt, int minutes, double bet) { this.challenger = challenger; this.expiresAt = expiresAt; this.minutes = minutes; this.bet = bet; }
+            final int increment;
+            final boolean gambit;
+            Challenge(UUID challenger, long expiresAt, int minutes, double bet, int increment, boolean gambit) {
+                this.challenger = challenger;
+                this.expiresAt = expiresAt;
+                this.minutes = minutes;
+                this.bet = bet;
+                this.increment = increment;
+                this.gambit = gambit;
+            }
         }
     }
 
@@ -679,6 +1075,59 @@ public class ChessPlugin extends JavaPlugin implements Listener {
             }
         }
 
+        // Titles are awarded from config thresholds (e.g. Candidate Master @ 1600)
+        List<TitleTier> titleTiers() {
+            List<TitleTier> tiers = new ArrayList<>();
+            for (Map<?, ?> map : plugin.getConfig().getMapList("titles")) {
+                Object t = map.get("threshold");
+                Object n = map.get("name");
+                if (t instanceof Number && n != null) {
+                    tiers.add(new TitleTier(((Number) t).intValue(), n.toString()));
+                }
+            }
+            tiers.sort(Comparator.comparingInt(t -> t.threshold));
+            return tiers;
+        }
+
+        String titleFor(int rating) {
+            String title = null;
+            for (TitleTier t : titleTiers()) {
+                if (rating >= t.threshold) title = t.name;
+            }
+            return title;
+        }
+
+        String titleFor(UUID id, String category) {
+            return titleFor(getRating(id, category));
+        }
+
+        List<LeaderEntry> top(String category, int limit) {
+            List<LeaderEntry> all = new ArrayList<>();
+            for (Map.Entry<UUID, Map<String, Rating>> e : ratings.entrySet()) {
+                Rating r = e.getValue().get(category);
+                if (r != null && r.games > 0) {
+                    all.add(new LeaderEntry(e.getKey(), r.rating, r.games));
+                }
+            }
+            all.sort((a, b) -> b.rating - a.rating);
+            List<LeaderEntry> out = new ArrayList<>();
+            for (int i = 0; i < Math.min(limit, all.size()); i++) out.add(all.get(i));
+            return out;
+        }
+
+        static class TitleTier {
+            final int threshold;
+            final String name;
+            TitleTier(int threshold, String name) { this.threshold = threshold; this.name = name; }
+        }
+
+        static class LeaderEntry {
+            final UUID uuid;
+            final int rating;
+            final int games;
+            LeaderEntry(UUID uuid, int rating, int games) { this.uuid = uuid; this.rating = rating; this.games = games; }
+        }
+
         static class Rating {
             int rating = DEFAULT_RATING;
             int games = 0;
@@ -694,7 +1143,108 @@ public class ChessPlugin extends JavaPlugin implements Listener {
         }
     }
 
-    // Daily puzzles: classic mate-in-one motifs (pool rotates by calendar day)
+    // Per-player puzzle stats (streak, solved-today, lichess-style rating) persisted to puzzle.yml
+    static class StatsManager {
+        static final int DEFAULT_PUZZLE_RATING = 1200;
+        private static final int PUZZLE_OPPONENT_RATING = 1500;
+        private final JavaPlugin plugin;
+        private final Map<UUID, Stats> stats = new ConcurrentHashMap<>();
+
+        StatsManager(JavaPlugin plugin) {
+            this.plugin = plugin;
+            plugin.getDataFolder().mkdirs();
+            load();
+        }
+
+        long todayEpochDay() {
+            return LocalDate.now(ZoneOffset.UTC).toEpochDay();
+        }
+
+        Stats get(UUID id) {
+            return stats.computeIfAbsent(id, k -> new Stats());
+        }
+
+        int streak(UUID id) { return get(id).streak; }
+        int bestStreak(UUID id) { return get(id).bestStreak; }
+        boolean isSolvedToday(UUID id, long day) { return get(id).lastSolvedDay == day; }
+        int solvedTotal(UUID id) { return get(id).solvedTotal; }
+        int puzzleRating(UUID id) { return get(id).puzzleRating; }
+        long lastRatedDay(UUID id) { return get(id).lastRatedDay; }
+
+        // called when the daily puzzle is solved; streak grows across consecutive UTC days
+        void onPuzzleSolved(UUID id, long day) {
+            Stats s = get(id);
+            s.solvedTotal++;
+            if (s.lastSolvedDay == day) return; // already counted today
+            if (s.lastSolvedDay == day - 1) s.streak++;
+            else s.streak = 1;
+            s.lastSolvedDay = day;
+            if (s.streak > s.bestStreak) s.bestStreak = s.streak;
+            save();
+        }
+
+        // lichess-style rating: expected score vs a fixed puzzle rating, K = 32. Applied once per day.
+        void applyPuzzleResult(UUID id, boolean solved, long day) {
+            Stats s = get(id);
+            if (s.lastRatedDay == day) return;
+            s.lastRatedDay = day;
+            double expected = 1.0 / (1.0 + Math.pow(10.0, (PUZZLE_OPPONENT_RATING - s.puzzleRating) / 400.0));
+            s.puzzleRating = Math.max(100, (int) Math.round(s.puzzleRating + 32.0 * ((solved ? 1.0 : 0.0) - expected)));
+            save();
+        }
+
+        void load() {
+            File f = new File(plugin.getDataFolder(), "puzzle.yml");
+            if (!f.exists()) return;
+            YamlConfiguration cfg = YamlConfiguration.loadConfiguration(f);
+            for (String key : cfg.getKeys(false)) {
+                UUID id;
+                try {
+                    id = UUID.fromString(key);
+                } catch (IllegalArgumentException ex) {
+                    continue;
+                }
+                Stats s = new Stats();
+                s.streak = cfg.getInt(key + ".streak");
+                s.bestStreak = cfg.getInt(key + ".best-streak");
+                s.lastSolvedDay = cfg.getLong(key + ".last-solved-day", -1);
+                s.solvedTotal = cfg.getInt(key + ".solved-total");
+                s.puzzleRating = cfg.getInt(key + ".puzzle-rating", DEFAULT_PUZZLE_RATING);
+                s.lastRatedDay = cfg.getLong(key + ".last-rated-day", -1);
+                stats.put(id, s);
+            }
+        }
+
+        void save() {
+            YamlConfiguration cfg = new YamlConfiguration();
+            for (Map.Entry<UUID, Stats> en : stats.entrySet()) {
+                String base = en.getKey().toString();
+                Stats s = en.getValue();
+                cfg.set(base + ".streak", s.streak);
+                cfg.set(base + ".best-streak", s.bestStreak);
+                cfg.set(base + ".last-solved-day", s.lastSolvedDay);
+                cfg.set(base + ".solved-total", s.solvedTotal);
+                cfg.set(base + ".puzzle-rating", s.puzzleRating);
+                cfg.set(base + ".last-rated-day", s.lastRatedDay);
+            }
+            try {
+                cfg.save(new File(plugin.getDataFolder(), "puzzle.yml"));
+            } catch (IOException ex) {
+                plugin.getLogger().warning("Could not save puzzle stats: " + ex.getMessage());
+            }
+        }
+
+        static class Stats {
+            int streak = 0;
+            int bestStreak = 0;
+            long lastSolvedDay = -1;
+            int solvedTotal = 0;
+            int puzzleRating = DEFAULT_PUZZLE_RATING;
+            long lastRatedDay = -1;
+        }
+    }
+
+    // Daily puzzles: mate-in-one/two/three motifs (pool rotates by calendar day)
     static class Puzzle {
         final String title;
         final boolean whiteToMove;
@@ -709,6 +1259,14 @@ public class ChessPlugin extends JavaPlugin implements Listener {
             this.pieces = pieces;
         }
 
+        List<String> solutionMoves() {
+            return Arrays.asList(solution.split("\\s+"));
+        }
+
+        int mateIn() {
+            return (solutionMoves().size() + 1) / 2;
+        }
+
         static final List<Puzzle> PUZZLES = Arrays.asList(
             new Puzzle("Smothered Mate", true, "Nf7#", new String[]{"WKg1", "WNg5", "BKh8", "BRg8", "BPg7", "BPh7"}),
             new Puzzle("Back-Rank Queen", true, "Qd8#", new String[]{"WKg1", "WQd1", "BKg8", "BPf7", "BPg7", "BPh7"}),
@@ -721,15 +1279,128 @@ public class ChessPlugin extends JavaPlugin implements Listener {
             new Puzzle("Long Diagonal", true, "Qa8#", new String[]{"WKg1", "WQf3", "WBc4", "BKg8", "BPf7", "BPg7", "BPh7"}),
             new Puzzle("Arabian Mate", true, "Rd8#", new String[]{"WKg1", "WRd1", "WNf6", "BKh8", "BPg7", "BPh7"}),
             new Puzzle("Smothered Mate (Black)", false, "Nf7#", new String[]{"BKg1", "BNg5", "WKh8", "WRg8", "WPg7", "WPh7"}),
-            new Puzzle("Back-Rank Queen (Black)", false, "Qd1#", new String[]{"WKg1", "WPf2", "WPg2", "WPh2", "BKg8", "BQd8"})
+            new Puzzle("Back-Rank Queen (Black)", false, "Qd1#", new String[]{"WKg1", "WPf2", "WPg2", "WPh2", "BKg8", "BQd8"}),
+            new Puzzle("Queen Sacrifice Smother", true, "Qg8+ Rxg8 Nf7#", new String[]{"WKg1", "WQd5", "WNh6", "BKh8", "BRf8", "BPg7", "BPh7"}),
+            new Puzzle("Knight Corridor", true, "Nf7+ Kg8 Qe8#", new String[]{"WKg1", "WQe2", "WNe5", "BKh8", "BPg7", "BPh7"}),
+            new Puzzle("Quiet Knight", true, "Ne6 Kg8 Qxg7#", new String[]{"WKg1", "WQc3", "WNc5", "BKh8", "BPg7", "BPh7"}),
+            new Puzzle("Knight Walk", true, "Nf7 Kg8 Ng5 Kf8 Qd8#", new String[]{"WKg1", "WQd3", "WNe5", "BKh7", "BPg6", "BPg7"}),
+            new Puzzle("Corridor Queen", true, "Nf7 Kg8 Qe8+ Kh7 Qh8#", new String[]{"WKg1", "WQe4", "WNe5", "BKh7", "BPg6", "BPg7"}),
+            new Puzzle("Knight Corridor (Black)", false, "Nf7+ Kg8 Qe8#", new String[]{"BKg1", "BQe2", "BNe5", "WKh8", "WPg7", "WPh7"}),
+            new Puzzle("Quiet Knight (Black)", false, "Ne6 Kg8 Qxg7#", new String[]{"BKg1", "BQc3", "BNc5", "WKh8", "WPg7", "WPh7"})
         );
 
+        // Custom puzzles appended to the daily rotation (loaded from puzzles.yml).
+        static final List<Puzzle> CUSTOM_PUZZLES = new ArrayList<>();
+
+        static List<Puzzle> allPuzzles() {
+            List<Puzzle> out = new ArrayList<>(PUZZLES);
+            out.addAll(CUSTOM_PUZZLES);
+            return out;
+        }
+
         static Puzzle today() {
+            List<Puzzle> pool = allPuzzles();
             long epochDay = LocalDate.now(ZoneOffset.UTC).toEpochDay();
-            int idx = (int) Math.floorMod(epochDay, PUZZLES.size());
-            Puzzle p = PUZZLES.get(idx);
+            int idx = (int) Math.floorMod(epochDay, pool.size());
+            Puzzle p = pool.get(idx);
             p.day = idx;
             return p;
+        }
+
+        static Puzzle byIndex(int index) {
+            List<Puzzle> pool = allPuzzles();
+            if (index < 1 || index > pool.size()) return null;
+            Puzzle p = pool.get(index - 1);
+            p.day = index - 1;
+            return p;
+        }
+
+        // Replay a puzzle's solution from its start position; true if it ends in checkmate.
+        static boolean valid(Puzzle p) {
+            ChessBoard b = new ChessBoard();
+            try {
+                b.setPosition(p.pieces, p.whiteToMove);
+            } catch (RuntimeException ex) {
+                return false;
+            }
+            if (b.isKingInCheck(Color.WHITE) || b.isKingInCheck(Color.BLACK)) return false;
+            int[] ldp = null;
+            for (String san : p.solutionMoves()) {
+                ChessMove m = findSan(b, ldp, san);
+                if (m == null) return false;
+                if (m.isDoublePawn) ldp = new int[]{m.toX, m.toY};
+                else ldp = null;
+                b.applyMove(m);
+                if (m.promotion) b.setPiece(m.toX, m.toY, new ChessPiece(m.promotionColor, ChessPieceType.QUEEN, m.toX, m.toY));
+                b.whiteToMove = !b.whiteToMove;
+            }
+            return b.isInCheckmate(b.whiteToMove, ldp);
+        }
+
+        // Find a legal move whose SAN matches the given string (mirrors ChessGame.findSanMove).
+        static ChessMove findSan(ChessBoard b, int[] ldp, String san) {
+            boolean side = b.whiteToMove;
+            for (int x = 0; x < 8; x++) {
+                for (int y = 0; y < 8; y++) {
+                    ChessPiece pc = b.getPiece(x, y);
+                    if (pc == null || (pc.color == Color.WHITE) != side) continue;
+                    for (ChessMove m : b.legalMoves(x, y, ldp)) {
+                        if (m.promotion) {
+                            for (ChessPieceType t : new ChessPieceType[]{ChessPieceType.QUEEN, ChessPieceType.ROOK, ChessPieceType.BISHOP, ChessPieceType.KNIGHT}) {
+                                if (ChessGame.sanForOn(b, m, t, ldp).equals(san)) return m;
+                            }
+                        } else if (ChessGame.sanForOn(b, m, null, ldp).equals(san)) {
+                            return m;
+                        }
+                    }
+                }
+            }
+            return null;
+        }
+
+        static void loadCustom(JavaPlugin plugin) {
+            loadCustomFrom(new File(plugin.getDataFolder(), "puzzles.yml"), plugin.getLogger());
+        }
+
+        static void loadCustomFrom(File f, Logger log) {
+            CUSTOM_PUZZLES.clear();
+            if (!f.exists()) {
+                log.info("No puzzles.yml found; no custom puzzles loaded.");
+                return;
+            }
+            try {
+                Object root = new org.yaml.snakeyaml.Yaml().load(new FileInputStream(f));
+                if (!(root instanceof Map)) return;
+                Object list = ((Map<?, ?>) root).get("custom-puzzles");
+                if (!(list instanceof List)) return;
+                for (Object o : (List<?>) list) {
+                    if (!(o instanceof Map)) continue;
+                    Map<?, ?> map = (Map<?, ?>) o;
+                    Object title = map.get("title");
+                    Object solution = map.get("solution");
+                    Object wtm = map.get("white-to-move");
+                    Object pieces = map.get("pieces");
+                    if (!(title instanceof String) || !(solution instanceof String) || !(pieces instanceof List)) {
+                        log.warning("Skipping custom puzzle with missing/invalid fields: " + title);
+                        continue;
+                    }
+                    List<String> pcs = new ArrayList<>();
+                    for (Object pc : (List<?>) pieces) {
+                        if (pc instanceof String) pcs.add((String) pc);
+                    }
+                    boolean whiteToMove = !(wtm instanceof Boolean) || (Boolean) wtm;
+                    Puzzle p = new Puzzle(title.toString(), whiteToMove, solution.toString(), pcs.toArray(new String[0]));
+                    if (valid(p)) {
+                        CUSTOM_PUZZLES.add(p);
+                        log.info("Loaded custom puzzle: " + p.title + " (mate in " + p.mateIn() + ")");
+                    } else {
+                        log.warning("Skipping invalid custom puzzle (solution cannot be replayed to mate): " + p.title);
+                    }
+                }
+            } catch (IOException ex) {
+                log.warning("Failed to read puzzles.yml: " + ex.getMessage());
+            }
+            log.info("Custom puzzles loaded: " + CUSTOM_PUZZLES.size());
         }
     }
 
@@ -768,23 +1439,49 @@ public class ChessPlugin extends JavaPlugin implements Listener {
         // spectators watching this game (player UUID -> player)
         final Map<UUID, Player> spectators = new ConcurrentHashMap<>();
         String spectatorTitle = null;
-        // daily puzzle mode (mate in one)
+        // daily puzzle mode (solutions may be mate in one, two, or three)
         boolean puzzleMode = false;
         boolean humanIsWhite = true;
         int puzzleDay = 0;
         String puzzleTitle = "";
         String puzzleSolution = "";
+        List<String> puzzleSolutionMoves = new ArrayList<>();
+        int puzzleMateIn = 1;
         int puzzleAttempts = 0;
+        int puzzleMoveIndex = 0;
+        boolean puzzleMateDelivered = false;
+        // move history + draw detection
+        final List<MoveEntry> moveHistory = new ArrayList<>();
+        int halfmoveClock = 0; // plies since last capture or pawn move (50-move rule)
+        final List<String> positionKeys = new ArrayList<>();
+        ChessMove lastMove = null;
+        final int increment; // Fischer increment in seconds per move
+        ChessBoard startPosition = null;
+        // draw offer (uuid of the player who offered)
+        UUID drawOfferFrom = null;
+        boolean confirmingResign = false;
+        // gambit mode: a check doubles the payout multiplier
+        boolean gambit = false;
+        double gambitMultiplier = 1.0;
+        // result of the last endGame call (used by replay/tournament hooks)
+        GameResult finalResult = null;
+        // hook run when the game ends (used by matchmaking/tournaments)
+        Runnable onEnd = null;
 
         ChessGame(ChessPlugin plugin, Player white, Player black, int minutes) {
+            this(plugin, white, black, minutes, 0);
+        }
+
+        ChessGame(ChessPlugin plugin, Player white, Player black, int minutes, int increment) {
             this.plugin = plugin;
             this.white = white;
             this.black = black;
             this.board = new ChessBoard();
             this.minutes = minutes;
+            this.increment = increment;
             this.whiteTime = minutes * 60;
             this.blackTime = minutes * 60;
-            this.title = ChatColor.DARK_GREEN + "Chess (" + minutes + "m " + timeControlName().toLowerCase() + ")";
+            this.title = ChatColor.DARK_GREEN + "Chess (" + minutes + (increment > 0 ? "+" + increment : "") + "m " + timeControlName().toLowerCase() + ")";
         }
 
         String timeControlName() {
@@ -803,21 +1500,27 @@ public class ChessPlugin extends JavaPlugin implements Listener {
             if (puzzleMode) {
                 // board already set by the puzzle command; no clock, ratings, or AI
                 running = true;
+                startPosition = board.copy();
                 openFor(white);
-                sendBoth(ChatColor.LIGHT_PURPLE + "Daily Puzzle #" + (puzzleDay + 1) + ": " + puzzleTitle + " - find mate in one!");
+                sendBoth(ChatColor.LIGHT_PURPLE + "Daily Puzzle #" + (puzzleDay + 1) + ": " + puzzleTitle + " - find mate in " + puzzleMateIn + "!");
                 sendBoth(ChatColor.GRAY + "You play " + (humanIsWhite ? "White" : "Black") + ". Wrong moves are not played. 'Hint' reveals the solution.");
                 updateAllInventories();
                 return;
             }
             board.resetInitialPosition();
             running = true;
+            startPosition = board.copy();
+            positionKeys.add(positionKey());
             if (!whiteIsAI) openFor(white);
             if (!blackIsAI) openFor(black);
             timerTask = plugin.getServer().getScheduler().runTaskTimer(plugin, this::tick, 20L, 20L);
             String cat = categoryFor(minutes);
-            sendBoth(ChatColor.GREEN + "Game started! " + timeControlName() + " (" + minutes + "m).");
+            sendBoth(ChatColor.GREEN + "Game started! " + timeControlName() + " (" + minutes + (increment > 0 ? "+" + increment : "") + "m).");
             if (bet > 0 && plugin.getEconomy() != null) {
                 sendBoth(ChatColor.GOLD + "Bet: " + plugin.getEconomy().format(bet) + " each. Winner takes all.");
+            }
+            if (gambit) {
+                sendBoth(ChatColor.LIGHT_PURPLE + "Gambit mode: every check doubles the payout multiplier (win only).");
             }
             if (whiteIsAI || blackIsAI) {
                 sendBoth(ChatColor.GRAY + "You are " + (whiteIsAI ? "Black" : "White") + " vs AI (" + aiDifficulty.label + "). Ratings are not affected.");
@@ -849,14 +1552,20 @@ public class ChessPlugin extends JavaPlugin implements Listener {
         void endGame(String reason, GameResult result) {
             if (!running) return;
             running = false;
+            finalResult = result;
             if (timerTask != null) timerTask.cancel();
             pendingPromotion = null;
             promotionPlayer = null;
             sendBoth(ChatColor.YELLOW + "Game ended: " + reason);
+            playEndSounds(result);
             if (result != GameResult.ABANDONED) {
                 applyElo(result);
             }
             resolveBet(result);
+            giveWinReward(result);
+            if (!puzzleMode && result != GameResult.ABANDONED && !white.getUniqueId().equals(black.getUniqueId())) {
+                plugin.replayManager.record(this, result);
+            }
             // kick spectators out (closes their boards -> triggers removeSpectator via close event)
             for (Player sp : new ArrayList<>(spectators.values())) {
                 if (sp.isOnline()) sp.closeInventory();
@@ -873,6 +1582,13 @@ public class ChessPlugin extends JavaPlugin implements Listener {
                 saved.remove(id);
             }
             plugin.removeGame(this);
+            if (onEnd != null) {
+                try {
+                    onEnd.run();
+                } catch (RuntimeException ex) {
+                    plugin.getLogger().warning("onEnd callback failed: " + ex.getMessage());
+                }
+            }
         }
 
         void resolveBet(GameResult result) {
@@ -882,19 +1598,36 @@ public class ChessPlugin extends JavaPlugin implements Listener {
                 plugin.getLogger().warning("Cannot settle chess bet of " + bet + ": economy unavailable.");
                 return;
             }
+            double factor = Math.max(1.0, gambitMultiplier);
             OfflinePlayer ow = Bukkit.getOfflinePlayer(white.getUniqueId());
             OfflinePlayer ob = Bukkit.getOfflinePlayer(black.getUniqueId());
             if (result == GameResult.WHITE_WIN) {
-                econ.depositPlayer(ow, bet * 2);
-                sendBoth(ChatColor.GOLD + "Bet settled: " + econ.format(bet * 2) + " paid to " + sideName(true) + ".");
+                econ.depositPlayer(ow, bet * 2 * factor);
+                sendBoth(ChatColor.GOLD + "Bet settled: " + econ.format(bet * 2 * factor) + " paid to " + sideName(true)
+                        + (factor > 1.0 ? " (gambit x" + factor + ")" : "") + ".");
             } else if (result == GameResult.BLACK_WIN) {
-                econ.depositPlayer(ob, bet * 2);
-                sendBoth(ChatColor.GOLD + "Bet settled: " + econ.format(bet * 2) + " paid to " + sideName(false) + ".");
+                econ.depositPlayer(ob, bet * 2 * factor);
+                sendBoth(ChatColor.GOLD + "Bet settled: " + econ.format(bet * 2 * factor) + " paid to " + sideName(false)
+                        + (factor > 1.0 ? " (gambit x" + factor + ")" : "") + ".");
             } else {
                 econ.depositPlayer(ow, bet);
                 econ.depositPlayer(ob, bet);
                 sendBoth(ChatColor.GRAY + "Bet refunded: " + econ.format(bet) + " each.");
             }
+        }
+
+        void giveWinReward(GameResult result) {
+            if (!plugin.getConfig().getBoolean("win-reward.enabled", true)) return;
+            if (puzzleMode) return;
+            if ((whiteIsAI || blackIsAI) && !plugin.getConfig().getBoolean("win-reward.ai-games", false)) return;
+            if (result != GameResult.WHITE_WIN && result != GameResult.BLACK_WIN) return;
+            Economy econ = plugin.getEconomy();
+            if (econ == null) return;
+            double amount = plugin.getConfig().getDouble("win-reward.amount", 100.0);
+            if (amount <= 0) return;
+            Player winner = result == GameResult.WHITE_WIN ? white : black;
+            econ.depositPlayer(Bukkit.getOfflinePlayer(winner.getUniqueId()), amount);
+            sendBoth(ChatColor.GOLD + "Win reward: " + econ.format(amount) + " paid to " + sideName(result == GameResult.WHITE_WIN) + ".");
         }
 
         void applyElo(GameResult result) {
@@ -970,6 +1703,7 @@ public class ChessPlugin extends JavaPlugin implements Listener {
 
         void maybeScheduleAI() {
             if (!running) return;
+            if (puzzleMode) return;
             if (aiThinking) return;
             if (!aiToMove()) return;
             aiThinking = true;
@@ -978,6 +1712,7 @@ public class ChessPlugin extends JavaPlugin implements Listener {
 
         void doAIMove() {
             if (!running) return;
+            if (puzzleMode) return;
             if (!aiToMove()) return;
             // aiThinking stays true until the move is applied, so tick() cannot re-schedule
             final ChessBoard snapshot = board.copy();
@@ -1032,21 +1767,7 @@ public class ChessPlugin extends JavaPlugin implements Listener {
                 inv.setItem(ctrlSlot, createInfo(infoText(guiRow, spectator)));
             }
             // bottom chest row: controls
-            inv.setItem(45, createButton(Material.ARROW, ChatColor.GREEN + "Flip"));
-            if (spectator) {
-                inv.setItem(51, createButton(Material.PAPER, ChatColor.AQUA + "Info"));
-                inv.setItem(53, createButton(Material.OAK_SIGN, ChatColor.GRAY + "Close"));
-            } else if (puzzleMode) {
-                inv.setItem(46, createButton(Material.BARRIER, ChatColor.RED + "Give Up"));
-                inv.setItem(47, createButton(Material.CLOCK, ChatColor.GOLD + "Hint"));
-                inv.setItem(51, createButton(Material.PAPER, ChatColor.AQUA + "Info"));
-                inv.setItem(53, createButton(Material.OAK_SIGN, ChatColor.GRAY + "Close"));
-            } else {
-                inv.setItem(46, createButton(Material.BARRIER, ChatColor.RED + "Resign"));
-                inv.setItem(47, createButton(Material.CLOCK, ChatColor.GOLD + "Time"));
-                inv.setItem(51, createButton(Material.PAPER, ChatColor.AQUA + "Info"));
-                inv.setItem(53, createButton(Material.OAK_SIGN, ChatColor.GRAY + "Close"));
-            }
+            renderControls(inv, p, spectator);
 
             // Apply bottom 4 ranks into player's own visible inventory slots:
             // bottomRow 0..3 maps to board rows 4..7
@@ -1144,12 +1865,43 @@ public class ChessPlugin extends JavaPlugin implements Listener {
             return info;
         }
 
+        private void renderControls(Inventory top, Player p, boolean spectator) {
+            top.setItem(45, createButton(Material.ARROW, ChatColor.GREEN + "Flip"));
+            if (spectator) {
+                top.setItem(51, createButton(Material.PAPER, ChatColor.AQUA + "Info"));
+                top.setItem(53, createButton(Material.OAK_SIGN, ChatColor.GRAY + "Close"));
+                return;
+            }
+            if (puzzleMode) {
+                top.setItem(46, createButton(Material.BARRIER, ChatColor.RED + "Give Up"));
+                top.setItem(47, createButton(Material.CLOCK, ChatColor.GOLD + "Hint"));
+                top.setItem(51, createButton(Material.PAPER, ChatColor.AQUA + "Info"));
+                top.setItem(53, createButton(Material.OAK_SIGN, ChatColor.GRAY + "Close"));
+                return;
+            }
+            top.setItem(46, createButton(Material.BARRIER, ChatColor.RED + "Resign"));
+            top.setItem(47, createButton(Material.CLOCK, ChatColor.GOLD + "Time"));
+            boolean pendingToMe = drawOfferFrom != null && !drawOfferFrom.equals(p.getUniqueId());
+            if (pendingToMe) {
+                top.setItem(48, createButton(Material.WRITABLE_BOOK, ChatColor.GREEN + "Accept Draw"));
+                top.setItem(49, createButton(Material.BARRIER, ChatColor.GRAY + "Deny Draw"));
+            } else {
+                top.setItem(48, createButton(Material.WRITABLE_BOOK, ChatColor.YELLOW + "Offer Draw"));
+            }
+            if (whiteIsAI || blackIsAI) {
+                top.setItem(50, createButton(Material.ARROW, ChatColor.AQUA + "Undo"));
+            }
+            top.setItem(51, createButton(Material.PAPER, ChatColor.AQUA + "Info"));
+            top.setItem(52, createButton(Material.BOOK, ChatColor.GOLD + "Moves"));
+            top.setItem(53, createButton(Material.OAK_SIGN, ChatColor.GRAY + "Close"));
+        }
+
         private String infoText(int guiRow, boolean spectator) {
             if (puzzleMode) {
                 if (guiRow == 0) return ChatColor.LIGHT_PURPLE + "Daily Puzzle #" + (puzzleDay + 1);
                 if (guiRow == 1) return ChatColor.AQUA + puzzleTitle;
                 if (guiRow == 2) return ChatColor.YELLOW + "Turn: " + (board.whiteToMove ? "White" : "Black");
-                return ChatColor.GRAY + "Mate in 1 | Tries: " + puzzleAttempts;
+                return ChatColor.GRAY + "Mate in " + puzzleMateIn + " | Tries: " + puzzleAttempts;
             }
             if (guiRow == 0) return ChatColor.AQUA + "White: " + (spectator ? sideName(true) : formatTime(whiteTime));
             if (guiRow == 1) return ChatColor.AQUA + "Black: " + (spectator ? sideName(false) : formatTime(blackTime));
@@ -1164,6 +1916,10 @@ public class ChessPlugin extends JavaPlugin implements Listener {
         }
 
         private ItemStack toItemFor(ChessPiece p) {
+            return toItemFor(p, false);
+        }
+
+        private ItemStack toItemFor(ChessPiece p, boolean glow) {
             if (p == null) return new ItemStack(Material.GRAY_STAINED_GLASS_PANE);
             Material mat = materialFor(p);
             ItemStack it = new ItemStack(mat);
@@ -1171,6 +1927,10 @@ public class ChessPlugin extends JavaPlugin implements Listener {
             meta.setDisplayName((p.color == Color.WHITE ? ChatColor.WHITE : ChatColor.DARK_GRAY) + p.type.name());
             meta.setLore(Collections.singletonList("x" + p.x + " y" + p.y));
             meta.getPersistentDataContainer().set(ChessPlugin.PIECE_KEY, PersistentDataType.STRING, p.toShortString());
+            if (glow) {
+                meta.addEnchant(Enchantment.UNBREAKING, 1, true);
+                meta.addItemFlags(ItemFlag.HIDE_ENCHANTS);
+            }
             it.setItemMeta(meta);
             return it;
         }
@@ -1223,15 +1983,38 @@ public class ChessPlugin extends JavaPlugin implements Listener {
                             giveUpPuzzle(p);
                             return;
                         case "Hint":
-                            p.sendMessage(ChatColor.AQUA + "Hint: play " + puzzleSolution + ".");
+                            p.sendMessage(ChatColor.AQUA + "Hint: play " + (puzzleMoveIndex < puzzleSolutionMoves.size() ? puzzleSolutionMoves.get(puzzleMoveIndex) : puzzleSolution) + ".");
                             return;
                         case "Resign":
-                            boolean whiteSide = p.getUniqueId().equals(white.getUniqueId());
-                            endGame(p.getName() + " resigned. " + (whiteSide ? sideName(false) : sideName(true)) + " wins.",
-                                    whiteSide ? GameResult.BLACK_WIN : GameResult.WHITE_WIN);
+                            if (confirmingResign) {
+                                boolean whiteSide = p.getUniqueId().equals(white.getUniqueId());
+                                endGame(p.getName() + " resigned. " + (whiteSide ? sideName(false) : sideName(true)) + " wins.",
+                                        whiteSide ? GameResult.BLACK_WIN : GameResult.WHITE_WIN);
+                            } else {
+                                confirmingResign = true;
+                                p.sendMessage(ChatColor.YELLOW + "Click Resign again to confirm.");
+                                plugin.getServer().getScheduler().runTaskLater(plugin, () -> {
+                                    if (confirmingResign && running) confirmingResign = false;
+                                }, 100L);
+                            }
                             return;
                         case "Time":
                             p.sendMessage(ChatColor.AQUA + "White: " + formatTime(whiteTime) + " | Black: " + formatTime(blackTime));
+                            return;
+                        case "Offer Draw":
+                            offerDraw(p);
+                            return;
+                        case "Accept Draw":
+                            acceptDrawOffer(p);
+                            return;
+                        case "Deny Draw":
+                            denyDrawOffer(p);
+                            return;
+                        case "Undo":
+                            undoLastMove(p);
+                            return;
+                        case "Moves":
+                            sendMoveLog(p);
                             return;
                         case "Info":
                             p.sendMessage(ChatColor.GRAY + "8x8 combined board. Close to restore inventory.");
@@ -1314,6 +2097,7 @@ public class ChessPlugin extends JavaPlugin implements Listener {
                 selectedPlayer = player.getUniqueId();
                 selectedX = br; selectedY = bc;
                 player.sendMessage(ChatColor.YELLOW + "Selected " + clicked.type.name() + " at " + squareName(br, bc));
+                refreshPlayer(player);
             } else {
                 if (!selectedPlayer.equals(player.getUniqueId())) {
                     player.sendMessage(ChatColor.RED + "Another player is mid-selection.");
@@ -1329,10 +2113,12 @@ public class ChessPlugin extends JavaPlugin implements Listener {
                     if (cc != null && fromPiece != null && cc.color == fromPiece.color) {
                         selectedX = br; selectedY = bc;
                         player.sendMessage(ChatColor.YELLOW + "Reselected " + cc.type.name() + " at " + squareName(br, bc));
+                        refreshPlayer(player);
                         return;
                     }
                     player.sendMessage(ChatColor.RED + "Illegal move.");
                     selectedPlayer = null; selectedX = -1; selectedY = -1;
+                    refreshPlayer(player);
                     return;
                 }
                 ChessMove move = chosen.get();
@@ -1400,36 +2186,101 @@ public class ChessPlugin extends JavaPlugin implements Listener {
             completeMove(move, type);
         }
 
-        // Daily puzzle: only a move that checkmates the opponent is accepted.
+        // Daily puzzle: each player move must match the next expected move of the solution.
         void handlePuzzleMove(Player p, ChessMove move, ChessPieceType promo) {
-            ChessBoard copy = board.copy();
-            copy.applyMove(move);
-            if (move.promotion && promo != null) {
-                copy.setPiece(move.toX, move.toY, new ChessPiece(move.promotionColor, promo, move.toX, move.toY));
-            }
-            copy.whiteToMove = !copy.whiteToMove;
-            int[] nextLdp = move.isDoublePawn ? new int[]{move.toX, move.toY} : null;
-            if (!copy.isInCheckmate(copy.whiteToMove, nextLdp)) {
+            if (puzzleMoveIndex >= puzzleSolutionMoves.size()) return;
+            String got = sanFor(move, promo);
+            String expected = puzzleSolutionMoves.get(puzzleMoveIndex);
+            if (!got.equals(expected)) {
                 puzzleAttempts++;
                 selectedPlayer = null; selectedX = -1; selectedY = -1;
-                p.sendMessage(ChatColor.RED + "That is not mate in one! Try again. (Attempt " + puzzleAttempts + ")");
+                p.sendMessage(ChatColor.RED + "That is not the solution! Try again. (Attempt " + (puzzleAttempts + 1) + ")");
                 updateAllInventories();
                 return;
             }
-            p.sendMessage(ChatColor.GREEN + "Checkmate! You solved today's puzzle"
-                    + (puzzleAttempts == 0 ? " on the first try" : " in " + (puzzleAttempts + 1) + " attempts") + "!");
-            p.sendMessage(ChatColor.GRAY + "Solution: " + squareName(move.fromX, move.fromY) + "->" + squareName(move.toX, move.toY)
-                    + (move.promotion ? " (" + promo.name().toLowerCase() + ")" : "") + ".");
+            boolean finalMove = puzzleMoveIndex == puzzleSolutionMoves.size() - 1;
             completeMove(move, promo);
+            puzzleMoveIndex++;
+            if (!running) return;
+            if (puzzleMateDelivered || finalMove) {
+                puzzleMateDelivered = false;
+                onPuzzleSolved(p);
+                return;
+            }
+            // apply the opponent's forced reply
+            ChessMove reply = findSanMove(puzzleSolutionMoves.get(puzzleMoveIndex));
+            if (reply == null) {
+                p.sendMessage(ChatColor.RED + "The puzzle solution is invalid (could not find the reply).");
+                onPuzzleSolved(p);
+                return;
+            }
+            completeMove(reply, reply.promotion ? ChessPieceType.QUEEN : null);
+            puzzleMoveIndex++;
+            puzzleMateDelivered = false;
+            updateAllInventories();
+        }
+
+        // Find a legal move on the current board whose SAN matches the given string (side to move).
+        ChessMove findSanMove(String san) {
+            boolean side = board.whiteToMove;
+            for (int x = 0; x < 8; x++) {
+                for (int y = 0; y < 8; y++) {
+                    ChessPiece pc = board.getPiece(x, y);
+                    if (pc == null || (pc.color == Color.WHITE) != side) continue;
+                    for (ChessMove m : board.legalMoves(x, y, lastDoublePawn)) {
+                        if (m.promotion) {
+                            for (ChessPieceType t : new ChessPieceType[]{ChessPieceType.QUEEN, ChessPieceType.ROOK, ChessPieceType.BISHOP, ChessPieceType.KNIGHT}) {
+                                if (sanForOn(board, m, t, lastDoublePawn).equals(san)) return m;
+                            }
+                        } else if (sanForOn(board, m, null, lastDoublePawn).equals(san)) {
+                            return m;
+                        }
+                    }
+                }
+            }
+            return null;
+        }
+
+        void onPuzzleSolved(Player p) {
+            boolean firstTry = puzzleAttempts == 0;
+            StatsManager sm = plugin.getStatsManager();
+            long day = sm.todayEpochDay();
+            boolean alreadySolved = sm.isSolvedToday(p.getUniqueId(), day);
+            sm.onPuzzleSolved(p.getUniqueId(), day);
+            sm.applyPuzzleResult(p.getUniqueId(), true, day);
+            p.sendMessage(ChatColor.GREEN + "Checkmate! You solved today's puzzle"
+                    + (firstTry ? " on the first try" : " in " + (puzzleAttempts + 1) + " attempts") + "!");
+            p.sendMessage(ChatColor.GRAY + "Puzzle rating: " + sm.puzzleRating(p.getUniqueId())
+                    + " | Streak: " + sm.streak(p.getUniqueId()) + " (best " + sm.bestStreak(p.getUniqueId()) + ")"
+                    + (alreadySolved ? "" : " | Total solved: " + sm.solvedTotal(p.getUniqueId())));
+            int bonusDays = plugin.getConfig().getInt("puzzle.streak-bonus-days", 7);
+            if (!alreadySolved && sm.streak(p.getUniqueId()) > 0 && sm.streak(p.getUniqueId()) % bonusDays == 0) {
+                Economy econ = plugin.getEconomy();
+                if (econ != null) {
+                    double bonus = plugin.getConfig().getDouble("puzzle.streak-bonus", 50.0);
+                    econ.depositPlayer(Bukkit.getOfflinePlayer(p.getUniqueId()), bonus);
+                    p.sendMessage(ChatColor.GOLD + "Streak bonus: " + econ.format(bonus) + " for a " + sm.streak(p.getUniqueId()) + "-day streak!");
+                }
+            }
+            p.playSound(p.getLocation(), Sound.ENTITY_PLAYER_LEVELUP, 0.6f, 1.0f);
+            endGame("You solved today's puzzle!", humanIsWhite ? GameResult.WHITE_WIN : GameResult.BLACK_WIN);
         }
 
         void giveUpPuzzle(Player p) {
             if (!running) return;
+            StatsManager sm = plugin.getStatsManager();
+            sm.applyPuzzleResult(p.getUniqueId(), false, sm.todayEpochDay());
             sendBoth(ChatColor.GRAY + "Solution: " + puzzleSolution + ". Come back tomorrow for a new one!");
             endGame("You gave up on today's puzzle.", GameResult.ABANDONED);
         }
 
         void completeMove(ChessMove move, ChessPieceType promotionTo) {
+            ChessPiece mover = board.getPiece(move.fromX, move.fromY);
+            boolean capture = board.getPiece(move.toX, move.toY) != null;
+            if (!capture && mover != null && mover.type == ChessPieceType.PAWN && move.toY != move.fromY) {
+                capture = true; // en passant capture
+            }
+            String san = sanFor(move, promotionTo);
             if (move.isDoublePawn) lastDoublePawn = new int[]{move.toX, move.toY};
             else lastDoublePawn = null;
             board.applyMove(move);
@@ -1437,11 +2288,21 @@ public class ChessPlugin extends JavaPlugin implements Listener {
                 board.setPiece(move.toX, move.toY, new ChessPiece(move.promotionColor, promotionTo, move.toX, move.toY));
             }
             board.whiteToMove = !board.whiteToMove;
+            moveHistory.add(new MoveEntry(move, promotionTo, san));
+            lastMove = move;
+            if (capture || (mover != null && mover.type == ChessPieceType.PAWN)) halfmoveClock = 0;
+            else halfmoveClock++;
+            if (!puzzleMode) {
+                if (board.whiteToMove) blackTime += increment;
+                else whiteTime += increment;
+            }
             selectedPlayer = null; selectedX = -1; selectedY = -1;
+            drawOfferFrom = null;
+            confirmingResign = false;
             updateAllInventories();
             if (board.isInCheckmate(board.whiteToMove, lastDoublePawn)) {
                 if (puzzleMode) {
-                    endGame("You solved today's puzzle!", humanIsWhite ? GameResult.WHITE_WIN : GameResult.BLACK_WIN);
+                    puzzleMateDelivered = true;
                     return;
                 }
                 Color winner = board.whiteToMove ? Color.BLACK : Color.WHITE;
@@ -1453,13 +2314,310 @@ public class ChessPlugin extends JavaPlugin implements Listener {
                 endGame("Draw by stalemate.", GameResult.DRAW);
                 return;
             }
+            String key = positionKey();
+            positionKeys.add(key);
+            int reps = 0;
+            for (String k : positionKeys) {
+                if (k.equals(key)) reps++;
+            }
+            if (reps >= 3) {
+                endGame("Draw by threefold repetition.", GameResult.DRAW);
+                return;
+            }
+            if (halfmoveClock >= 100) {
+                endGame("Draw by the fifty-move rule.", GameResult.DRAW);
+                return;
+            }
+            if (gambit && bet > 0 && board.isKingInCheck(board.whiteToMove ? Color.WHITE : Color.BLACK)) {
+                double maxMul = plugin.getConfig().getDouble("gambit.max-multiplier", 16.0);
+                if (gambitMultiplier < maxMul) {
+                    double mult = plugin.getConfig().getDouble("gambit.double-multiplier", 2.0);
+                    gambitMultiplier = Math.min(maxMul, gambitMultiplier * mult);
+                    Economy econ = plugin.getEconomy();
+                    sendBoth(ChatColor.DARK_RED + "Check! Gambit bet doubled: "
+                            + (econ != null ? econ.format(bet * gambitMultiplier) : String.valueOf(bet * gambitMultiplier))
+                            + " each on the line.");
+                }
+            }
+            if (!puzzleMode) sendMoveLogLine();
+            playMoveSound(mover, capture);
             maybeScheduleAI();
+        }
+
+        void sendMoveLogLine() {
+            if (moveHistory.isEmpty() || moveHistory.size() % 2 != 0) return;
+            int moveNum = moveHistory.size() / 2;
+            MoveEntry w = moveHistory.get(moveHistory.size() - 2);
+            MoveEntry b = moveHistory.get(moveHistory.size() - 1);
+            sendBoth(ChatColor.GRAY + "" + moveNum + ". " + ChatColor.WHITE + w.san + " " + ChatColor.DARK_GRAY + b.san);
+        }
+
+        void playMoveSound(ChessPiece mover, boolean capture) {
+            Sound s = capture ? Sound.BLOCK_NOTE_BLOCK_HARP : Sound.BLOCK_NOTE_BLOCK_PLING;
+            if (!whiteIsAI && white.isOnline()) white.playSound(white.getLocation(), s, 0.5f, 1.0f);
+            if (!blackIsAI && black.isOnline()) black.playSound(black.getLocation(), s, 0.5f, 1.0f);
+        }
+
+        void playEndSounds(GameResult result) {
+            if (result == GameResult.WHITE_WIN) {
+                if (!whiteIsAI && white.isOnline()) white.playSound(white.getLocation(), Sound.ENTITY_PLAYER_LEVELUP, 0.6f, 1.0f);
+                if (!blackIsAI && black.isOnline()) black.playSound(black.getLocation(), Sound.ENTITY_VILLAGER_NO, 0.6f, 1.0f);
+            } else if (result == GameResult.BLACK_WIN) {
+                if (!blackIsAI && black.isOnline()) black.playSound(black.getLocation(), Sound.ENTITY_PLAYER_LEVELUP, 0.6f, 1.0f);
+                if (!whiteIsAI && white.isOnline()) white.playSound(white.getLocation(), Sound.ENTITY_VILLAGER_NO, 0.6f, 1.0f);
+            } else if (result == GameResult.DRAW) {
+                if (!whiteIsAI && white.isOnline()) white.playSound(white.getLocation(), Sound.BLOCK_NOTE_BLOCK_BASS, 0.6f, 1.0f);
+                if (!blackIsAI && black.isOnline()) black.playSound(black.getLocation(), Sound.BLOCK_NOTE_BLOCK_BASS, 0.6f, 1.0f);
+            }
+        }
+
+        Player opponentOf(Player p) {
+            return p.getUniqueId().equals(white.getUniqueId()) ? black : white;
+        }
+
+        void offerDraw(Player p) {
+            if (!running) return;
+            if (puzzleMode) {
+                p.sendMessage(ChatColor.RED + "You cannot offer a draw in puzzles.");
+                return;
+            }
+            if (drawOfferFrom != null) {
+                p.sendMessage(ChatColor.YELLOW + "A draw offer is already pending.");
+                return;
+            }
+            if (whiteIsAI || blackIsAI) {
+                p.sendMessage(ChatColor.RED + "You cannot offer a draw against the AI.");
+                return;
+            }
+            drawOfferFrom = p.getUniqueId();
+            sendBoth(ChatColor.YELLOW + p.getName() + " offers a draw.");
+            Player other = opponentOf(p);
+            if (other.isOnline()) other.sendMessage(ChatColor.YELLOW + "Click 'Accept Draw' to accept or 'Deny Draw' to decline.");
+            updateAllInventories();
+        }
+
+        void acceptDrawOffer(Player p) {
+            if (drawOfferFrom == null) {
+                p.sendMessage(ChatColor.RED + "There is no pending draw offer.");
+                return;
+            }
+            drawOfferFrom = null;
+            endGame("Draw by agreement.", GameResult.DRAW);
+        }
+
+        void denyDrawOffer(Player p) {
+            if (drawOfferFrom == null) {
+                p.sendMessage(ChatColor.RED + "There is no pending draw offer.");
+                return;
+            }
+            drawOfferFrom = null;
+            sendBoth(ChatColor.GRAY + "Draw offer declined.");
+            updateAllInventories();
+        }
+
+        void sendMoveLog(Player p) {
+            if (moveHistory.isEmpty()) {
+                p.sendMessage(ChatColor.GRAY + "No moves played yet.");
+                return;
+            }
+            List<String> lines = new ArrayList<>();
+            StringBuilder line = new StringBuilder();
+            int moveNum = 1;
+            for (int i = 0; i < moveHistory.size(); i++) {
+                MoveEntry e = moveHistory.get(i);
+                if (i % 2 == 0) {
+                    if (i > 0) {
+                        lines.add(line.toString());
+                        line = new StringBuilder();
+                    }
+                    line.append(moveNum++).append(". ").append(e.san);
+                } else {
+                    line.append(" ").append(e.san);
+                }
+            }
+            lines.add(line.toString());
+            p.sendMessage(ChatColor.GOLD + "Move log:");
+            for (String l : lines) p.sendMessage(ChatColor.GRAY + l);
+        }
+
+        static String pieceLetter(ChessPieceType t) {
+            switch (t) {
+                case PAWN: return "";
+                case KNIGHT: return "N";
+                case BISHOP: return "B";
+                case ROOK: return "R";
+                case QUEEN: return "Q";
+                default: return "K";
+            }
+        }
+
+        // SAN for a move on the current board (before it is played)
+        String sanFor(ChessMove move, ChessPieceType promotionTo) {
+            return sanForOn(board, move, promotionTo, lastDoublePawn);
+        }
+
+        // SAN generator usable from a bare board (used for puzzle solution matching and verification)
+        static String sanForOn(ChessBoard b, ChessMove move, ChessPieceType promotionTo, int[] lastDoublePawn) {
+            ChessPiece mover = b.getPiece(move.fromX, move.fromY);
+            if (mover == null) return "";
+            StringBuilder sb = new StringBuilder();
+            if (move.isCastling) {
+                sb.append(move.toY > move.fromY ? "O-O" : "O-O-O");
+            } else {
+                if (mover.type != ChessPieceType.PAWN) sb.append(pieceLetter(mover.type));
+                if (mover.type != ChessPieceType.PAWN) {
+                    List<String> others = new ArrayList<>();
+                    for (int x = 0; x < 8; x++) {
+                        for (int y = 0; y < 8; y++) {
+                            ChessPiece p = b.getPiece(x, y);
+                            if (p == null || (x == move.fromX && y == move.fromY)) continue;
+                            if (p.type != mover.type || p.color != mover.color) continue;
+                            for (ChessMove m : b.legalMoves(x, y, lastDoublePawn)) {
+                                if (m.toX == move.toX && m.toY == move.toY) {
+                                    others.add((char) ('a' + y) + "" + (x + 1));
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    if (!others.isEmpty()) {
+                        boolean sameFile = others.stream().anyMatch(o -> o.charAt(0) == (char) ('a' + move.fromY));
+                        boolean sameRank = others.stream().anyMatch(o -> o.charAt(1) == (char) ('0' + (move.fromX + 1)));
+                        if (!sameFile) sb.append((char) ('a' + move.fromY));
+                        else if (!sameRank) sb.append(move.fromX + 1);
+                        else sb.append((char) ('a' + move.fromY)).append(move.fromX + 1);
+                    }
+                }
+                boolean capture = b.getPiece(move.toX, move.toY) != null;
+                if (!capture && mover.type == ChessPieceType.PAWN && move.toY != move.fromY) {
+                    capture = true; // en passant
+                }
+                if (capture) {
+                    if (mover.type == ChessPieceType.PAWN) sb.append((char) ('a' + move.fromY));
+                    sb.append('x');
+                }
+                sb.append((char) ('a' + move.toY)).append(move.toX + 1);
+                if (move.promotion) sb.append('=').append(pieceLetter(promotionTo == null ? ChessPieceType.QUEEN : promotionTo));
+            }
+            ChessBoard copy = b.copy();
+            copy.applyMove(move);
+            if (move.promotion && promotionTo != null) {
+                copy.setPiece(move.toX, move.toY, new ChessPiece(move.promotionColor, promotionTo, move.toX, move.toY));
+            }
+            copy.whiteToMove = !copy.whiteToMove;
+            int[] nl = move.isDoublePawn ? new int[]{move.toX, move.toY} : null;
+            if (copy.isInCheckmate(copy.whiteToMove, nl)) sb.append('#');
+            else if (copy.isKingInCheck(copy.whiteToMove ? Color.WHITE : Color.BLACK)) sb.append('+');
+            return sb.toString();
+        }
+
+        String positionKey() {
+            return keyFor(board, lastDoublePawn);
         }
 
         private String squareName(int r, int c) {
             char file = (char) ('a' + c);
-            int rank = 8 - r;
+            int rank = r + 1;
             return "" + file + rank;
+        }
+
+        // Undo the last full move pair against the AI (or the last ply if the AI has not replied).
+        void undoLastMove(Player p) {
+            if (!running) {
+                p.sendMessage(ChatColor.RED + "The game is not running.");
+                return;
+            }
+            if (puzzleMode) {
+                p.sendMessage(ChatColor.RED + "Undo is not available in puzzles.");
+                return;
+            }
+            if (!(whiteIsAI || blackIsAI)) {
+                p.sendMessage(ChatColor.RED + "Undo is only available when playing the AI.");
+                return;
+            }
+            if (aiThinking) {
+                p.sendMessage(ChatColor.RED + "Wait for the AI to finish thinking.");
+                return;
+            }
+            if (moveHistory.isEmpty()) {
+                p.sendMessage(ChatColor.RED + "There are no moves to undo.");
+                return;
+            }
+            int plies = Math.min(2, moveHistory.size());
+            for (int i = 0; i < plies; i++) moveHistory.remove(moveHistory.size() - 1);
+            rebuildFromHistory();
+            selectedPlayer = null; selectedX = -1; selectedY = -1;
+            drawOfferFrom = null;
+            confirmingResign = false;
+            sendBoth(ChatColor.YELLOW + "Move undone by " + p.getName() + ".");
+            updateAllInventories();
+        }
+
+        void rebuildFromHistory() {
+            board.copyFrom(startPosition);
+            lastDoublePawn = null;
+            positionKeys.clear();
+            halfmoveClock = 0;
+            ChessBoard tmp = startPosition.copy();
+            int[] ldp = null;
+            positionKeys.add(keyFor(tmp, ldp));
+            for (MoveEntry e : moveHistory) {
+                ChessPiece mover = tmp.getPiece(e.move.fromX, e.move.fromY);
+                boolean capture = tmp.getPiece(e.move.toX, e.move.toY) != null;
+                if (!capture && mover != null && mover.type == ChessPieceType.PAWN && e.move.toY != e.move.fromY) capture = true;
+                if (e.move.isDoublePawn) ldp = new int[]{e.move.toX, e.move.toY};
+                else ldp = null;
+                tmp.applyMove(e.move);
+                if (e.promotionTo != null) {
+                    tmp.setPiece(e.move.toX, e.move.toY, new ChessPiece(e.move.promotionColor, e.promotionTo, e.move.toX, e.move.toY));
+                }
+                tmp.whiteToMove = !tmp.whiteToMove;
+                if (capture || (mover != null && mover.type == ChessPieceType.PAWN)) halfmoveClock = 0;
+                else halfmoveClock++;
+                positionKeys.add(keyFor(tmp, ldp));
+            }
+            board.copyFrom(tmp);
+            lastDoublePawn = ldp;
+        }
+
+        static String keyFor(ChessBoard b, int[] ldp) {
+            StringBuilder sb = new StringBuilder();
+            for (int x = 0; x < 8; x++) {
+                for (int y = 0; y < 8; y++) {
+                    ChessPiece p = b.getPiece(x, y);
+                    if (p == null) sb.append('.');
+                    else sb.append(p.color == Color.WHITE ? 'W' : 'B').append(p.type.name().charAt(0)).append(p.hasMoved ? 'm' : 'u');
+                }
+            }
+            sb.append(b.whiteToMove ? 'w' : 'b');
+            ChessPiece wk = b.getPiece(0, 4);
+            ChessPiece bk = b.getPiece(7, 4);
+            if (wk != null && wk.type == ChessPieceType.KING && wk.color == Color.WHITE && !wk.hasMoved) {
+                ChessPiece wkr = b.getPiece(0, 7);
+                ChessPiece wqr = b.getPiece(0, 0);
+                if (wkr != null && wkr.type == ChessPieceType.ROOK && !wkr.hasMoved) sb.append('K');
+                if (wqr != null && wqr.type == ChessPieceType.ROOK && !wqr.hasMoved) sb.append('Q');
+            }
+            if (bk != null && bk.type == ChessPieceType.KING && bk.color == Color.BLACK && !bk.hasMoved) {
+                ChessPiece bkr = b.getPiece(7, 7);
+                ChessPiece bqr = b.getPiece(7, 0);
+                if (bkr != null && bkr.type == ChessPieceType.ROOK && !bkr.hasMoved) sb.append('k');
+                if (bqr != null && bqr.type == ChessPieceType.ROOK && !bqr.hasMoved) sb.append('q');
+            }
+            if (ldp != null) sb.append((char) ('a' + ldp[1])).append(ldp[0] + 1);
+            else sb.append('-');
+            return sb.toString();
+        }
+
+        static class MoveEntry {
+            final ChessMove move;
+            final ChessPieceType promotionTo;
+            final String san;
+            MoveEntry(ChessMove move, ChessPieceType promotionTo, String san) {
+                this.move = move;
+                this.promotionTo = promotionTo;
+                this.san = san;
+            }
         }
 
         void updateAllInventories() {
@@ -1498,12 +2656,26 @@ public class ChessPlugin extends JavaPlugin implements Listener {
 
         // Re-apply the board to the top chest and the player's mapped inventory slots
         private void renderBoardInto(Inventory top, Player p, boolean spectator) {
+            renderControls(top, p, spectator);
+            boolean viewer = !spectator && selectedPlayer != null && selectedPlayer.equals(p.getUniqueId()) && selectedX >= 0;
+            List<int[]> highlights = null;
+            if (viewer) {
+                highlights = new ArrayList<>();
+                for (ChessMove m : board.legalMoves(selectedX, selectedY, lastDoublePawn)) {
+                    highlights.add(new int[]{m.toX, m.toY});
+                }
+            }
+            int[] sel = viewer ? new int[]{selectedX, selectedY} : null;
+            int[] lf = null, lt = null;
+            if (lastMove != null) {
+                lf = new int[]{lastMove.fromX, lastMove.fromY};
+                lt = new int[]{lastMove.toX, lastMove.toY};
+            }
             // top area
             for (int guiRow = 0; guiRow < 4; guiRow++) {
                 for (int guiCol = 0; guiCol < 8; guiCol++) {
                     int slot = guiRow * 9 + guiCol;
-                    ChessPiece piece = board.getPiece(guiRow, guiCol);
-                    top.setItem(slot, toItemFor(piece));
+                    top.setItem(slot, boardItem(board.getPiece(guiRow, guiCol), sel, highlights, lf, lt, guiRow, guiCol));
                 }
                 int ctrlSlot = guiRow * 9 + 8;
                 ItemStack info = top.getItem(ctrlSlot);
@@ -1520,13 +2692,31 @@ public class ChessPlugin extends JavaPlugin implements Listener {
             for (int br = 0; br < 4; br++) {
                 int boardRow = 4 + br;
                 for (int col = 0; col < 8; col++) {
-                    ItemStack item = toItemFor(board.getPiece(boardRow, col));
-                    int invIndex;
-                    if (br == 3) invIndex = col; // hotbar 0..7
-                    else invIndex = 9 + br * 9 + col; // br 0->9..16, br1->18..25, br2->27..34
-                    pinv.setItem(invIndex, item);
+                    int invIndex = br == 3 ? col : 9 + br * 9 + col;
+                    pinv.setItem(invIndex, boardItem(board.getPiece(boardRow, col), sel, highlights, lf, lt, boardRow, col));
                 }
             }
+        }
+
+        private ItemStack boardItem(ChessPiece piece, int[] sel, List<int[]> hl, int[] lf, int[] lt, int r, int c) {
+            boolean isHl = false;
+            if (hl != null) {
+                for (int[] h : hl) {
+                    if (h[0] == r && h[1] == c) {
+                        isHl = true;
+                        break;
+                    }
+                }
+            }
+            if (piece == null) {
+                if (isHl) return new ItemStack(Material.LIME_STAINED_GLASS_PANE);
+                return new ItemStack(Material.GRAY_STAINED_GLASS_PANE);
+            }
+            boolean glow = isHl
+                    || (sel != null && sel[0] == r && sel[1] == c)
+                    || (lf != null && lf[0] == r && lf[1] == c)
+                    || (lt != null && lt[0] == r && lt[1] == c);
+            return toItemFor(piece, glow);
         }
     }
 
@@ -1559,6 +2749,353 @@ public class ChessPlugin extends JavaPlugin implements Listener {
             inv.setContents(Arrays.stream(contents).map(item -> item == null ? null : item.clone()).toArray(ItemStack[]::new));
             inv.setArmorContents(Arrays.stream(armor).map(item -> item == null ? null : item.clone()).toArray(ItemStack[]::new));
             inv.setItemInOffHand(offhand == null ? null : offhand.clone());
+        }
+    }
+
+    // ----------------- Replay, matchmaking, and tournaments -------------------
+
+    // Recent finished games, text-replayable via /chessreplay (persisted to replays.yml)
+    static class ReplayManager {
+        static class RecordedGame {
+            String white = "";
+            String black = "";
+            String result = "DRAW";
+            int minutes = 3;
+            long when = 0;
+            List<String> moves = new ArrayList<>();
+        }
+
+        final ChessPlugin plugin;
+        final List<RecordedGame> games = new ArrayList<>();
+
+        ReplayManager(ChessPlugin plugin) {
+            this.plugin = plugin;
+            load();
+        }
+
+        void record(ChessGame g, ChessGame.GameResult result) {
+            RecordedGame rg = new RecordedGame();
+            rg.white = g.white.getName();
+            rg.black = g.black.getName();
+            rg.minutes = g.minutes;
+            rg.when = System.currentTimeMillis();
+            rg.result = result.name();
+            for (ChessGame.MoveEntry me : g.moveHistory) {
+                rg.moves.add(me.san);
+            }
+            games.add(0, rg);
+            int max = plugin.getConfig().getInt("replay.max-games", 20);
+            while (games.size() > max) games.remove(games.size() - 1);
+            save();
+        }
+
+        static String resultText(String name) {
+            switch (name) {
+                case "WHITE_WIN": return ChatColor.GREEN + "White won";
+                case "BLACK_WIN": return ChatColor.GREEN + "Black won";
+                default: return ChatColor.YELLOW + "Draw";
+            }
+        }
+
+        void load() {
+            File f = new File(plugin.getDataFolder(), "replays.yml");
+            if (!f.exists()) return;
+            YamlConfiguration cfg = YamlConfiguration.loadConfiguration(f);
+            int max = plugin.getConfig().getInt("replay.max-games", 20);
+            List<?> list = cfg.getList("games");
+            if (list == null) return;
+            for (int i = 0; i < list.size() && games.size() < max; i++) {
+                Object o = list.get(i);
+                if (!(o instanceof Map)) continue;
+                Map<?, ?> map = (Map<?, ?>) o;
+                RecordedGame rg = new RecordedGame();
+                if (map.get("white") != null) rg.white = map.get("white").toString();
+                if (map.get("black") != null) rg.black = map.get("black").toString();
+                if (map.get("result") != null) rg.result = map.get("result").toString();
+                rg.minutes = toInt(map.get("minutes"), 3);
+                rg.when = toLong(map.get("when"), 0);
+                if (map.get("moves") instanceof List) {
+                    for (Object m : (List<?>) map.get("moves")) {
+                        if (m != null) rg.moves.add(m.toString());
+                    }
+                }
+                games.add(rg);
+            }
+        }
+
+        void save() {
+            YamlConfiguration cfg = new YamlConfiguration();
+            List<Map<String, Object>> out = new ArrayList<>();
+            for (RecordedGame rg : games) {
+                Map<String, Object> m = new LinkedHashMap<>();
+                m.put("white", rg.white);
+                m.put("black", rg.black);
+                m.put("result", rg.result);
+                m.put("minutes", rg.minutes);
+                m.put("when", rg.when);
+                m.put("moves", rg.moves);
+                out.add(m);
+            }
+            cfg.set("games", out);
+            try {
+                cfg.save(new File(plugin.getDataFolder(), "replays.yml"));
+            } catch (IOException ex) {
+                plugin.getLogger().warning("Could not save replays: " + ex.getMessage());
+            }
+        }
+
+        static int toInt(Object o, int dflt) {
+            return o instanceof Number ? ((Number) o).intValue() : dflt;
+        }
+
+        static long toLong(Object o, long dflt) {
+            return o instanceof Number ? ((Number) o).longValue() : dflt;
+        }
+    }
+
+    // Queue-based matchmaking with rating-band pairing (/chessmatch)
+    static class MatchmakingManager {
+        static class QueueEntry {
+            final UUID id;
+            QueueEntry(UUID id) { this.id = id; }
+        }
+
+        final ChessPlugin plugin;
+        final Map<String, List<QueueEntry>> queue = new ConcurrentHashMap<>();
+
+        MatchmakingManager(ChessPlugin plugin) {
+            this.plugin = plugin;
+            plugin.getServer().getScheduler().runTaskTimer(plugin, this::tick, 40L, 40L);
+        }
+
+        // toggles membership; returns true if the player was added, false if removed
+        boolean toggle(Player p, String category) {
+            List<QueueEntry> q = queue.computeIfAbsent(category, k -> new ArrayList<>());
+            synchronized (q) {
+                for (Iterator<QueueEntry> it = q.iterator(); it.hasNext(); ) {
+                    if (it.next().id.equals(p.getUniqueId())) {
+                        it.remove();
+                        return false;
+                    }
+                }
+                q.add(new QueueEntry(p.getUniqueId()));
+                return true;
+            }
+        }
+
+        void remove(UUID id) {
+            for (List<QueueEntry> q : queue.values()) {
+                synchronized (q) {
+                    q.removeIf(e -> e.id.equals(id));
+                }
+            }
+        }
+
+        int minutesFor(String category) {
+            if (category.equals("bullet")) return 1;
+            if (category.equals("rapid")) return 10;
+            return plugin.getConfig().getInt("matchmaking.default-time", 3);
+        }
+
+        void tick() {
+            for (String cat : new String[]{"bullet", "blitz", "rapid"}) {
+                while (tryMatch(cat)) { /* keep pairing until no compatible pair remains */ }
+            }
+        }
+
+        boolean tryMatch(String category) {
+            List<QueueEntry> q = queue.get(category);
+            if (q == null || q.isEmpty()) return false;
+            int band = plugin.getConfig().getInt("matchmaking.rating-band", 200);
+            synchronized (q) {
+                q.removeIf(e -> {
+                    Player pp = Bukkit.getPlayer(e.id);
+                    return pp == null || !pp.isOnline() || plugin.activeGames.containsKey(e.id);
+                });
+                if (q.size() < 2) return false;
+                for (int i = 0; i < q.size(); i++) {
+                    UUID a = q.get(i).id;
+                    for (int j = i + 1; j < q.size(); j++) {
+                        UUID b = q.get(j).id;
+                        int ra = plugin.eloManager.getRating(a, category);
+                        int rb = plugin.eloManager.getRating(b, category);
+                        if (Math.abs(ra - rb) > band) continue;
+                        Player pa = Bukkit.getPlayer(a);
+                        Player pb = Bukkit.getPlayer(b);
+                        if (pa == null || pb == null || !pa.isOnline() || !pb.isOnline()) continue;
+                        // remove j first (higher index), then i
+                        q.remove(j);
+                        q.remove(i);
+                        ChessGame game = new ChessGame(plugin, pa, pb, minutesFor(category));
+                        plugin.activeGames.put(pa.getUniqueId(), game);
+                        plugin.activeGames.put(pb.getUniqueId(), game);
+                        game.start();
+                        pa.sendMessage(ChatColor.GREEN + "Match found! You play " + pb.getName() + " (" + category + ").");
+                        pb.sendMessage(ChatColor.GREEN + "Match found! You play " + pa.getName() + " (" + category + ").");
+                        return true;
+                    }
+                }
+            }
+            return false;
+        }
+    }
+
+    // Single-elimination tournaments (/chesstourney). One tournament at a time.
+    static class TournamentManager {
+        enum State { NONE, LOBBY, RUNNING }
+
+        static class Match {
+            final UUID white;
+            final UUID black;
+            UUID winner = null;
+            ChessGame game = null;
+            int attempts = 0;
+            boolean resolved = false;
+            Match(UUID white, UUID black) { this.white = white; this.black = black; }
+        }
+
+        State state = State.NONE;
+        UUID creator = null;
+        final List<UUID> players = new ArrayList<>();
+        final List<Match> matches = new ArrayList<>();
+        final List<UUID> waiting = new ArrayList<>();
+        int round = 0;
+        UUID champion = null;
+
+        boolean lobbyOpen() { return state == State.LOBBY; }
+        boolean running() { return state == State.RUNNING; }
+
+        void startMatch(ChessPlugin plugin, Match m) {
+            Player w = Bukkit.getPlayer(m.white);
+            Player b = Bukkit.getPlayer(m.black);
+            boolean wOff = w == null || !w.isOnline();
+            boolean bOff = b == null || !b.isOnline();
+            if (wOff || bOff) {
+                m.winner = bOff ? m.white : m.black;
+                m.resolved = true;
+                m.game = null;
+                waiting.add(m.winner);
+                if (allResolved()) advanceRound(plugin);
+                return;
+            }
+            ChessGame g = new ChessGame(plugin, w, b, 5);
+            g.onEnd = () -> onMatchEnd(plugin, m);
+            m.game = g;
+            plugin.activeGames.put(w.getUniqueId(), g);
+            plugin.activeGames.put(b.getUniqueId(), g);
+            g.start();
+        }
+
+        boolean allResolved() {
+            for (Match m : matches) {
+                if (!m.resolved) return false;
+            }
+            return true;
+        }
+
+        void onMatchEnd(ChessPlugin plugin, Match m) {
+            if (state != State.RUNNING || m.resolved) return;
+            ChessGame.GameResult r = m.game == null ? ChessGame.GameResult.ABANDONED : m.game.finalResult;
+            UUID winner = null;
+            if (r == ChessGame.GameResult.WHITE_WIN) winner = m.white;
+            else if (r == ChessGame.GameResult.BLACK_WIN) winner = m.black;
+            else if (r == ChessGame.GameResult.ABANDONED) {
+                Player w = Bukkit.getPlayer(m.white);
+                Player b = Bukkit.getPlayer(m.black);
+                boolean wOff = w == null || !w.isOnline();
+                boolean bOff = b == null || !b.isOnline();
+                if (!bOff && wOff) winner = m.white;
+                else winner = m.black;
+            }
+            if (winner == null && m.attempts < 1) {
+                // draw -> one automatic rematch
+                m.attempts++;
+                announceMatchResult(plugin, m, "draw", "rematch scheduled");
+                startMatch(plugin, m);
+                return;
+            }
+            if (winner == null) {
+                // still undecided after rematch; higher blitz rating advances (white wins ties)
+                int rw = plugin.eloManager.getRating(m.white, "blitz");
+                int rb = plugin.eloManager.getRating(m.black, "blitz");
+                winner = rw >= rb ? m.white : m.black;
+            }
+            m.winner = winner;
+            m.resolved = true;
+            announceMatchResult(plugin, m, winner.toString(), null);
+            waiting.add(winner);
+            if (allResolved()) advanceRound(plugin);
+        }
+
+        void announceMatchResult(ChessPlugin plugin, Match m, String winnerUuid, String extra) {
+            Player w = Bukkit.getPlayer(m.white);
+            Player b = Bukkit.getPlayer(m.black);
+            String wn = w != null ? w.getName() : "?";
+            String bn = b != null ? b.getName() : "?";
+            String msg;
+            if (extra != null) {
+                msg = ChatColor.GRAY + "Tournament: " + wn + " vs " + bn + " ended in a " + extra + ".";
+            } else {
+                Player win = Bukkit.getPlayer(UUID.fromString(winnerUuid));
+                msg = ChatColor.GOLD + "Tournament: " + (win != null ? win.getName() : "?") + " advances (" + wn + " vs " + bn + ").";
+            }
+            plugin.getServer().broadcastMessage(msg);
+        }
+
+        void advanceRound(ChessPlugin plugin) {
+            if (waiting.size() == 1) {
+                champion = waiting.get(0);
+                Player c = Bukkit.getPlayer(champion);
+                plugin.getServer().broadcastMessage(ChatColor.GOLD + "Chess tournament champion: " + (c != null ? c.getName() : "?") + "!");
+                reset();
+                return;
+            }
+            Collections.shuffle(waiting);
+            matches.clear();
+            for (int i = 0; i < waiting.size(); i += 2) {
+                matches.add(new Match(waiting.get(i), waiting.get(i + 1)));
+            }
+            waiting.clear();
+            round++;
+            plugin.getServer().broadcastMessage(ChatColor.GOLD + "Tournament round " + round + " starting (" + matches.size() + " match" + (matches.size() == 1 ? "" : "es") + ").");
+            for (Match m : new ArrayList<>(matches)) startMatch(plugin, m);
+        }
+
+        boolean start(ChessPlugin plugin) {
+            if (state != State.LOBBY) return false;
+            int n = players.size();
+            if (n != 4 && n != 8) return false;
+            Collections.shuffle(players);
+            state = State.RUNNING;
+            champion = null;
+            round = 1;
+            matches.clear();
+            for (int i = 0; i < n; i += 2) {
+                matches.add(new Match(players.get(i), players.get(i + 1)));
+            }
+            plugin.getServer().broadcastMessage(ChatColor.GOLD + "Tournament started with " + n + " players! Round 1.");
+            for (Match m : new ArrayList<>(matches)) startMatch(plugin, m);
+            return true;
+        }
+
+        void end(ChessPlugin plugin) {
+            for (Match m : matches) {
+                if (m.game != null && m.game.running) {
+                    m.game.onEnd = null;
+                    m.game.endGame("Tournament cancelled.", ChessGame.GameResult.ABANDONED);
+                }
+            }
+            reset();
+        }
+
+        void reset() {
+            state = State.NONE;
+            creator = null;
+            players.clear();
+            matches.clear();
+            waiting.clear();
+            round = 0;
+            champion = null;
         }
     }
 
@@ -2043,6 +3580,22 @@ public class ChessPlugin extends JavaPlugin implements Listener {
             }
             c.whiteToMove = whiteToMove;
             return c;
+        }
+
+        void copyFrom(ChessBoard other) {
+            for (int x = 0; x < 8; x++) {
+                for (int y = 0; y < 8; y++) {
+                    ChessPiece p = other.b[x][y];
+                    if (p == null) {
+                        b[x][y] = null;
+                    } else {
+                        ChessPiece np = new ChessPiece(p.color, p.type, x, y);
+                        np.hasMoved = p.hasMoved;
+                        b[x][y] = np;
+                    }
+                }
+            }
+            whiteToMove = other.whiteToMove;
         }
 
         boolean isKingInCheck(Color kingColor) {
