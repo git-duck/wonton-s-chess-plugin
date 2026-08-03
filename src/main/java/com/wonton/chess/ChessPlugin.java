@@ -59,6 +59,7 @@ public class ChessPlugin extends JavaPlugin implements Listener {
         Objects.requireNonNull(this.getCommand("chessdeny")).setExecutor(new ChessDenyCommand());
         Objects.requireNonNull(this.getCommand("chessrating")).setExecutor(new ChessRatingCommand());
         Objects.requireNonNull(this.getCommand("chesstoggle")).setExecutor(new ChessToggleCommand());
+        Objects.requireNonNull(this.getCommand("chessai")).setExecutor(new ChessAiCommand());
         getLogger().info("ChessPlugin enabled");
     }
 
@@ -253,6 +254,60 @@ public class ChessPlugin extends JavaPlugin implements Listener {
 
         @Override
         public List<String> onTabComplete(CommandSender sender, Command command, String alias, String[] args) {
+            return Collections.emptyList();
+        }
+    }
+
+    private class ChessAiCommand implements TabExecutor {
+        @Override
+        public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
+            if (!(sender instanceof Player)) {
+                sender.sendMessage("Players only.");
+                return true;
+            }
+            Player p = (Player) sender;
+            if (!enabled) {
+                p.sendMessage(ChatColor.RED + "Chess is currently disabled.");
+                return true;
+            }
+            int minutes = 3;
+            boolean humanWhite = true;
+            if (args.length > 2) {
+                p.sendMessage(ChatColor.RED + "Usage: /chessai [1|3|5|10] [white|black]");
+                return true;
+            }
+            for (String a : args) {
+                if (a.equalsIgnoreCase("white")) {
+                    humanWhite = true;
+                } else if (a.equalsIgnoreCase("black")) {
+                    humanWhite = false;
+                } else if (a.matches("1|3|5|10")) {
+                    minutes = Integer.parseInt(a);
+                } else {
+                    p.sendMessage(ChatColor.RED + "Usage: /chessai [1|3|5|10] [white|black]");
+                    return true;
+                }
+            }
+            if (activeGames.containsKey(p.getUniqueId())) {
+                p.sendMessage(ChatColor.RED + "You are already in a game.");
+                return true;
+            }
+            ChessGame game = new ChessGame(ChessPlugin.this, p, p, minutes);
+            game.whiteIsAI = !humanWhite;
+            game.blackIsAI = humanWhite;
+            activeGames.put(p.getUniqueId(), game);
+            game.start();
+            return true;
+        }
+
+        @Override
+        public List<String> onTabComplete(CommandSender sender, Command command, String alias, String[] args) {
+            if (args.length <= 2) {
+                String prefix = args[args.length - 1].toLowerCase();
+                return Arrays.asList("1", "3", "5", "10", "white", "black").stream()
+                        .filter(s -> s.startsWith(prefix))
+                        .collect(Collectors.toList());
+            }
             return Collections.emptyList();
         }
     }
@@ -473,6 +528,10 @@ public class ChessPlugin extends JavaPlugin implements Listener {
         // pending pawn promotion (move awaiting piece choice)
         ChessMove pendingPromotion = null;
         UUID promotionPlayer = null;
+        // AI sides: in AI games the human's Player object is reused for the AI slot
+        boolean whiteIsAI = false;
+        boolean blackIsAI = false;
+        boolean aiThinking = false;
 
         ChessGame(ChessPlugin plugin, Player white, Player black, int minutes) {
             this.plugin = plugin;
@@ -500,24 +559,30 @@ public class ChessPlugin extends JavaPlugin implements Listener {
         void start() {
             board.resetInitialPosition();
             running = true;
-            openFor(white);
-            openFor(black);
+            if (!whiteIsAI) openFor(white);
+            if (!blackIsAI) openFor(black);
             timerTask = plugin.getServer().getScheduler().runTaskTimer(plugin, this::tick, 20L, 20L);
             String cat = categoryFor(minutes);
-            sendBoth(ChatColor.GREEN + "Game started! " + timeControlName() + " (" + minutes + "m). White to move.");
-            sendBoth(ChatColor.GRAY + "White " + white.getName() + " [" + plugin.eloManager.getRating(white.getUniqueId(), cat) + "] vs Black " + black.getName() + " [" + plugin.eloManager.getRating(black.getUniqueId(), cat) + "]");
+            sendBoth(ChatColor.GREEN + "Game started! " + timeControlName() + " (" + minutes + "m).");
+            if (whiteIsAI || blackIsAI) {
+                sendBoth(ChatColor.GRAY + "You are " + (whiteIsAI ? "Black" : "White") + " vs AI. Ratings are not affected.");
+            } else {
+                sendBoth(ChatColor.GRAY + "White " + white.getName() + " [" + plugin.eloManager.getRating(white.getUniqueId(), cat) + "] vs Black " + black.getName() + " [" + plugin.eloManager.getRating(black.getUniqueId(), cat) + "]");
+            }
             updateAllInventories();
+            maybeScheduleAI();
         }
 
         void tick() {
             if (!running) return;
             if (board.whiteToMove) {
                 whiteTime--;
-                if (whiteTime <= 0) endGame("Black wins on time", GameResult.BLACK_WIN);
+                if (whiteTime <= 0) endGame(sideName(false) + " wins on time", GameResult.BLACK_WIN);
             } else {
                 blackTime--;
-                if (blackTime <= 0) endGame("White wins on time", GameResult.WHITE_WIN);
+                if (blackTime <= 0) endGame(sideName(true) + " wins on time", GameResult.WHITE_WIN);
             }
+            if (running) maybeScheduleAI();
             updateAllInventories();
         }
 
@@ -549,6 +614,7 @@ public class ChessPlugin extends JavaPlugin implements Listener {
         }
 
         void applyElo(GameResult result) {
+            if (whiteIsAI || blackIsAI) return;
             String cat = categoryFor(minutes);
             if (result == GameResult.DRAW) {
                 EloManager.RatingChange[] ch = plugin.eloManager.applyResult(white.getUniqueId(), black.getUniqueId(), 0.5, cat);
@@ -574,9 +640,9 @@ public class ChessPlugin extends JavaPlugin implements Listener {
         void onPlayerQuit(Player p) {
             if (!running) return;
             if (p.getUniqueId().equals(white.getUniqueId())) {
-                endGame(black.getName() + " wins (opponent disconnected)", GameResult.BLACK_WIN);
+                endGame(sideName(false) + " wins (opponent disconnected)", GameResult.BLACK_WIN);
             } else {
-                endGame(white.getName() + " wins (opponent disconnected)", GameResult.WHITE_WIN);
+                endGame(sideName(true) + " wins (opponent disconnected)", GameResult.WHITE_WIN);
             }
         }
 
@@ -595,8 +661,40 @@ public class ChessPlugin extends JavaPlugin implements Listener {
         }
 
         void sendBoth(String s) {
-            if (white.isOnline()) white.sendMessage(s);
-            if (black.isOnline()) black.sendMessage(s);
+            if (!whiteIsAI && white.isOnline()) white.sendMessage(s);
+            if (!blackIsAI && black.isOnline()) black.sendMessage(s);
+        }
+
+        String sideName(boolean isWhite) {
+            boolean ai = isWhite ? whiteIsAI : blackIsAI;
+            Player p = isWhite ? white : black;
+            return ai ? "AI" : p.getName();
+        }
+
+        boolean aiToMove() {
+            return (board.whiteToMove && whiteIsAI) || (!board.whiteToMove && blackIsAI);
+        }
+
+        void maybeScheduleAI() {
+            if (!running) return;
+            if (aiThinking) return;
+            if (!aiToMove()) return;
+            aiThinking = true;
+            plugin.getServer().getScheduler().runTaskLater(plugin, this::doAIMove, 5L);
+        }
+
+        void doAIMove() {
+            aiThinking = false;
+            if (!running) return;
+            if (!aiToMove()) return;
+            ChessMove best = new ChessAI().findBestMove(board, lastDoublePawn, minutes);
+            if (best == null) {
+                sendBoth(ChatColor.RED + "AI could not find a move.");
+                return;
+            }
+            sendBoth(ChatColor.GRAY + "AI played " + squareName(best.fromX, best.fromY) + "->" + squareName(best.toX, best.toY)
+                    + (best.promotion ? " (promotes to " + best.promotionTo.name().toLowerCase() + ")" : "") + ".");
+            completeMove(best, best.promotionTo);
         }
 
         // Build and open combined view for player
@@ -739,8 +837,9 @@ public class ChessPlugin extends JavaPlugin implements Listener {
                             openFor(p);
                             return;
                         case "Resign":
-                            endGame(p.getName() + " resigned. " + (p.getUniqueId().equals(white.getUniqueId()) ? black.getName() : white.getName()) + " wins.",
-                                    p.getUniqueId().equals(white.getUniqueId()) ? GameResult.BLACK_WIN : GameResult.WHITE_WIN);
+                            boolean whiteSide = p.getUniqueId().equals(white.getUniqueId());
+                            endGame(p.getName() + " resigned. " + (whiteSide ? sideName(false) : sideName(true)) + " wins.",
+                                    whiteSide ? GameResult.BLACK_WIN : GameResult.WHITE_WIN);
                             return;
                         case "Time":
                             p.sendMessage(ChatColor.AQUA + "White: " + formatTime(whiteTime) + " | Black: " + formatTime(blackTime));
@@ -795,6 +894,10 @@ public class ChessPlugin extends JavaPlugin implements Listener {
 
         private void handleBoardClick(Player player, int br, int bc) {
             if (!running) return;
+            if (aiToMove()) {
+                player.sendMessage(ChatColor.RED + "The AI is thinking...");
+                return;
+            }
             ChessPiece clicked = board.getPiece(br, bc);
             // if no selection started
             if (selectedPlayer == null) {
@@ -912,7 +1015,7 @@ public class ChessPlugin extends JavaPlugin implements Listener {
             updateAllInventories();
             if (board.isInCheckmate(board.whiteToMove, lastDoublePawn)) {
                 Color winner = board.whiteToMove ? Color.BLACK : Color.WHITE;
-                endGame((board.whiteToMove ? "White" : "Black") + " is checkmated. " + (board.whiteToMove ? black.getName() : white.getName()) + " wins.",
+                endGame((board.whiteToMove ? "White" : "Black") + " is checkmated. " + sideName(!board.whiteToMove) + " wins.",
                         winner == Color.WHITE ? GameResult.WHITE_WIN : GameResult.BLACK_WIN);
                 return;
             }
@@ -920,6 +1023,7 @@ public class ChessPlugin extends JavaPlugin implements Listener {
                 endGame("Draw by stalemate.", GameResult.DRAW);
                 return;
             }
+            maybeScheduleAI();
         }
 
         private String squareName(int r, int c) {
@@ -929,16 +1033,20 @@ public class ChessPlugin extends JavaPlugin implements Listener {
         }
 
         void updateAllInventories() {
-            // Refresh both players: update chest top and their player-inventory mapped slots
-            for (Player p : Arrays.asList(white, black)) {
-                if (!p.isOnline()) continue;
-                // while this player is choosing a promotion piece, keep the picker visible
-                if (pendingPromotion != null && promotionPlayer != null && promotionPlayer.equals(p.getUniqueId())) continue;
-                InventoryView iv = p.getOpenInventory();
-                if (iv == null) continue;
-                Inventory top = iv.getTopInventory();
-                if (top == null) continue;
-                if (iv.getTitle().equals(title)) {
+            // Refresh all human players
+            if (!whiteIsAI) refreshPlayer(white);
+            if (!blackIsAI) refreshPlayer(black);
+        }
+
+        private void refreshPlayer(Player p) {
+            if (p == null || !p.isOnline()) return;
+            // while this player is choosing a promotion piece, keep the picker visible
+            if (pendingPromotion != null && promotionPlayer != null && promotionPlayer.equals(p.getUniqueId())) return;
+            InventoryView iv = p.getOpenInventory();
+            if (iv == null) return;
+            Inventory top = iv.getTopInventory();
+            if (top == null) return;
+            if (iv.getTitle().equals(title)) {
                     // re-apply top area and player's mapped slots
                     // top:
                     for (int guiRow = 0; guiRow < 4; guiRow++) {
@@ -975,7 +1083,6 @@ public class ChessPlugin extends JavaPlugin implements Listener {
                         }
                     }
                 }
-            }
         }
     }
 
@@ -1008,6 +1115,176 @@ public class ChessPlugin extends JavaPlugin implements Listener {
             inv.setContents(Arrays.stream(contents).map(item -> item == null ? null : item.clone()).toArray(ItemStack[]::new));
             inv.setArmorContents(Arrays.stream(armor).map(item -> item == null ? null : item.clone()).toArray(ItemStack[]::new));
             inv.setItemInOffHand(offhand == null ? null : offhand.clone());
+        }
+    }
+
+    // ----------------- Chess AI (alpha-beta minimax with piece-square tables) -----------------
+    static class ChessAI {
+        private static final int INF = 1_000_000_000;
+        private static final int MATE = 1_000_000;
+        private static final int[] PV = {100, 500, 320, 330, 900, 20000};
+        // Piece-square tables (white's perspective; row 0 = furthest rank from white)
+        private static final int[][] PST = {
+            { 0,  0,  0,  0,  0,  0,  0,  0,
+             50, 50, 50, 50, 50, 50, 50, 50,
+             10, 10, 20, 30, 30, 20, 10, 10,
+              5,  5, 10, 25, 25, 10,  5,  5,
+              0,  0,  0, 20, 20,  0,  0,  0,
+              5, -5,-10,  0,  0,-10, -5,  5,
+              5, 10, 10,-20,-20, 10, 10,  5,
+              0,  0,  0,  0,  0,  0,  0,  0},
+            { 0,  0,  0,  0,  0,  0,  0,  0,
+              5, 10, 10, 10, 10, 10, 10,  5,
+             -5,  0,  0,  0,  0,  0,  0, -5,
+             -5,  0,  0,  0,  0,  0,  0, -5,
+             -5,  0,  0,  0,  0,  0,  0, -5,
+             -5,  0,  0,  0,  0,  0,  0, -5,
+             -5,  0,  0,  0,  0,  0,  0, -5,
+              0,  0,  0,  5,  5,  0,  0,  0},
+            { -50,-40,-30,-30,-30,-30,-40,-50,
+              -40,-20,  0,  0,  0,  0,-20,-40,
+              -30,  0, 10, 15, 15, 10,  0,-30,
+              -30,  5, 15, 20, 20, 15,  5,-30,
+              -30,  0, 15, 20, 20, 15,  0,-30,
+              -30,  5, 10, 15, 15, 10,  5,-30,
+              -40,-20,  0,  5,  5,  0,-20,-40,
+              -50,-40,-30,-30,-30,-30,-40,-50},
+            { -20,-10,-10,-10,-10,-10,-10,-20,
+              -10,  0,  0,  0,  0,  0,  0,-10,
+              -10,  0,  5, 10, 10,  5,  0,-10,
+              -10,  5,  5, 10, 10,  5,  5,-10,
+              -10,  0, 10, 10, 10, 10,  0,-10,
+              -10, 10, 10, 10, 10, 10, 10,-10,
+              -10,  5,  0,  0,  0,  0,  5,-10,
+              -20,-10,-10,-10,-10,-10,-10,-20},
+            { -20,-10,-10, -5, -5,-10,-10,-20,
+              -10,  0,  0,  0,  0,  0,  0,-10,
+              -10,  0,  5,  5,  5,  5,  0,-10,
+               -5,  0,  5,  5,  5,  5,  0, -5,
+                0,  0,  5,  5,  5,  5,  0, -5,
+              -10,  5,  5,  5,  5,  5,  0,-10,
+              -10,  0,  5,  0,  0,  0,  0,-10,
+              -20,-10,-10, -5, -5,-10,-10,-20},
+            { -30,-40,-40,-50,-50,-40,-40,-30,
+              -30,-40,-40,-50,-50,-40,-40,-30,
+              -30,-40,-40,-50,-50,-40,-40,-30,
+              -30,-40,-40,-50,-50,-40,-40,-30,
+              -20,-30,-30,-40,-40,-30,-30,-20,
+              -10,-20,-20,-20,-20,-20,-20,-10,
+               20, 20,  0,  0,  0,  0, 20, 20,
+               20, 30, 10,  0,  0, 10, 30, 20}
+        };
+        private long nodes;
+        private static final long NODE_LIMIT = 250_000;
+
+        ChessMove findBestMove(ChessBoard b, int[] lastDoublePawn, int minutes) {
+            int depth = minutes <= 3 ? 3 : 4;
+            nodes = 0;
+            List<ChessMove> moves = allLegalMoves(b, lastDoublePawn);
+            if (moves.isEmpty()) return null;
+            orderMoves(moves, b);
+            int bestScore = -INF;
+            List<ChessMove> best = new ArrayList<>();
+            for (ChessMove m : moves) {
+                ChessBoard copy = b.copy();
+                applyMove(copy, m);
+                int[] nextLdp = m.isDoublePawn ? new int[]{m.toX, m.toY} : null;
+                int score = -alphabeta(copy, depth - 1, -INF, INF, 1, nextLdp);
+                if (score > bestScore) {
+                    bestScore = score;
+                    best.clear();
+                    best.add(m);
+                } else if (score == bestScore) {
+                    best.add(m);
+                }
+            }
+            if (best.isEmpty()) return null;
+            return best.get(new Random().nextInt(best.size()));
+        }
+
+        private int alphabeta(ChessBoard b, int depth, int alpha, int beta, int ply, int[] lastDoublePawn) {
+            nodes++;
+            List<ChessMove> moves = allLegalMoves(b, lastDoublePawn);
+            if (moves.isEmpty()) {
+                // side to move is mated or stalemated
+                if (b.isKingInCheck(b.whiteToMove ? Color.WHITE : Color.BLACK)) return -(MATE - ply);
+                return 0;
+            }
+            if (depth <= 0 || nodes > NODE_LIMIT) return evalFromSide(b);
+            orderMoves(moves, b);
+            int best = -INF;
+            for (ChessMove m : moves) {
+                ChessBoard copy = b.copy();
+                applyMove(copy, m);
+                int[] nextLdp = m.isDoublePawn ? new int[]{m.toX, m.toY} : null;
+                int score = -alphabeta(copy, depth - 1, -beta, -alpha, ply + 1, nextLdp);
+                if (score > best) best = score;
+                if (best > alpha) alpha = best;
+                if (alpha >= beta) break;
+            }
+            return best;
+        }
+
+        private List<ChessMove> allLegalMoves(ChessBoard b, int[] lastDoublePawn) {
+            List<ChessMove> out = new ArrayList<>();
+            Color side = b.whiteToMove ? Color.WHITE : Color.BLACK;
+            for (int x = 0; x < 8; x++) for (int y = 0; y < 8; y++) {
+                ChessPiece p = b.getPiece(x, y);
+                if (p == null || p.color != side) continue;
+                for (ChessMove m : b.legalMoves(x, y, lastDoublePawn)) {
+                    if (m.promotion) {
+                        for (ChessPieceType t : new ChessPieceType[]{ChessPieceType.QUEEN, ChessPieceType.ROOK, ChessPieceType.BISHOP, ChessPieceType.KNIGHT}) {
+                            ChessMove c = new ChessMove(m.fromX, m.fromY, m.toX, m.toY);
+                            c.promotion = true;
+                            c.promotionColor = m.promotionColor;
+                            c.promotionTo = t;
+                            out.add(c);
+                        }
+                    } else {
+                        out.add(m);
+                    }
+                }
+            }
+            return out;
+        }
+
+        private void orderMoves(List<ChessMove> moves, ChessBoard b) {
+            moves.sort((a, c) -> Integer.compare(captureValue(c, b), captureValue(a, b)));
+        }
+
+        private int captureValue(ChessMove m, ChessBoard b) {
+            ChessPiece t = b.getPiece(m.toX, m.toY);
+            if (t == null) return m.promotion ? PV[ChessPieceType.QUEEN.ordinal()] : 0;
+            return PV[t.type.ordinal()];
+        }
+
+        private void applyMove(ChessBoard b, ChessMove m) {
+            b.applyMove(m);
+            if (m.promotion && m.promotionTo != null) {
+                b.setPiece(m.toX, m.toY, new ChessPiece(m.promotionColor, m.promotionTo, m.toX, m.toY));
+            }
+            b.whiteToMove = !b.whiteToMove;
+        }
+
+        private int evalFromSide(ChessBoard b) {
+            int e = evaluate(b);
+            return b.whiteToMove ? e : -e;
+        }
+
+        private int evaluate(ChessBoard b) {
+            int score = 0;
+            for (int x = 0; x < 8; x++) for (int y = 0; y < 8; y++) {
+                ChessPiece p = b.getPiece(x, y);
+                if (p == null) continue;
+                int v = PV[p.type.ordinal()] + pst(p.type, x, y, p.color);
+                score += (p.color == Color.WHITE) ? v : -v;
+            }
+            return score;
+        }
+
+        private int pst(ChessPieceType t, int x, int y, Color c) {
+            int row = (c == Color.WHITE) ? (7 - x) : x;
+            return PST[t.ordinal()][row * 8 + y];
         }
     }
 

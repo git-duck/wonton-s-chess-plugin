@@ -23,6 +23,10 @@ commands:
     description: Toggles the chess plugin on or off
     usage: /chesstoggle
     permission: chess.admin
+  chessai:
+    description: Play a game against the AI: /chessai [1|3|5|10] [white|black]
+    usage: /chessai [1|3|5|10] [white|black]
+    permission: chess.use
 permissions:
   chess.use:
     description: Allows using the chess commands
