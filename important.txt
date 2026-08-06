@@ -36,3 +36,6 @@ OUT OF, OR IN CONNECTION WITH THE SOFTWARE.
 6. Updraft Network
 Updraft Network holds all rights to use to all plugins made under commission and are permitted to access all plugins even if commissioned by another server.
 However they hold no right to request removal or be the sole cause of removal, unless an administrating figure from per server has outright challenged Updraft, declared race, or mention in any way that is not friendly. They hold the right to ask for permission of removal of plugins in a majority vote. 3 out of eeveesun, wonton_stew, git-duck, & MrFrenchGuy23 must agree that removal of plugins are permitted. 
+
+7. ARG content
+ARG content will be periodically added if there is an active ungoing ARG being created, server owners will be notified 24 hours beforehand when ARG updates are committed. Any bug fixes and updates will be sent via a google doc and server management will have to wait for developers to recompile the plugin in a new repo. When the ARG period is over or when all clues have been exhausted all ARG elements will be removed and development of plugins will continue as usual.
