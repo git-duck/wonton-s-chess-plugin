@@ -5,10 +5,14 @@ TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION
 1. OWNERSHIP
 The software, source code, and compiled binaries (hereafter referred to as "the Software") 
 contained in this repository are the exclusive intellectual property of the original authors 
-("eeveesun", "wonton_stew", "git-duck", and "MrFrenchGuy23"). 
+("wonton_stew" and "MrFrenchGuy23"). 
 
 2. LIMITED EVALUATION LICENSE
-Permission is hereby granted to authorized servers with consent from all developers of this plugin.
+Permission is hereby granted to authorized servers with consent from all developers of this plugin. (from wonton_stew and MrFrenchGuy23 only)
+
+Updraft Network
+BrutalitySMP
+FlamiumSMP
 
 3. RESTRICTIONS
 You may not:
@@ -22,9 +26,13 @@ The authors reserve the express right to terminate this evaluation license and r
 to use, host, or run the Software at any time, for any reason, without prior notice. Upon 
 written or verbal notification of revocation by the authors, you must immediately cease all 
 use of the Software and permanently delete all copies of the source code and compiled 
-binaries (.jar files) from your systems, servers, and storage networks.
+binaries from your systems, servers, and storage networks.
 
 5. NO WARRANTY
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED. IN NO 
 EVENT SHALL THE AUTHORS BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER LIABILITY ARISING FROM, 
 OUT OF, OR IN CONNECTION WITH THE SOFTWARE.
+
+6. Updraft Network
+Updraft Network holds all rights to use to all plugins made under commission and are permitted to access all plugins even if commissioned by another server.
+However they hold no right to request removal or be the sole cause of removal, unless an administrating figure from per server has outright challenged Updraft, declared race, or mention in any way that is not friendly. They hold the right to ask for permission of removal of plugins in a majority vote. 3 out of eeveesun, wonton_stew, git-duck, & MrFrenchGuy23 must agree that removal of plugins are permitted. 
