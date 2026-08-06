@@ -844,7 +844,7 @@ public class ChessPlugin extends JavaPlugin implements Listener {
                             sb.append("\n").append(ChatColor.GRAY).append("  Admin: /chesstourney create");
                         }
                     } else if (tournament.state == TournamentManager.State.LOBBY) {
-                        sb.append("\n").append(ChatColor.GREEN).append("  Lobby open (").append(tournament.players.size()).append(" player").append(tournament.players.size() == 1 ? "" : "s").append(", need 4 or 8).");
+                        sb.append("\n").append(ChatColor.GREEN).append("  Lobby open (").append(tournament.players.size()).append(" player").append(tournament.players.size() == 1 ? "" : "s").append(",");
                         for (UUID id : tournament.players) {
                             Player pl = Bukkit.getPlayer(id);
                             sb.append("\n").append(ChatColor.GRAY).append("    - ").append(pl != null ? pl.getName() : "?");
@@ -896,6 +896,17 @@ public class ChessPlugin extends JavaPlugin implements Listener {
     }
 
     @EventHandler
+    public void onInventoryDrag(InventoryDragEvent e) {
+        HumanEntity he = e.getWhoClicked();
+        if (!(he instanceof Player)) return;
+        Player p = (Player) he;
+        // Prevent dragging items while a player's chess board (or spectator view) is open.
+        if (activeGames.containsKey(p.getUniqueId()) || spectators.containsKey(p.getUniqueId())) {
+            e.setCancelled(true);
+        }
+    }
+
+    @EventHandler
     public void onInventoryClose(InventoryCloseEvent e) {
         HumanEntity he = e.getPlayer();
         if (!(he instanceof Player)) return;
@@ -907,6 +918,53 @@ public class ChessPlugin extends JavaPlugin implements Listener {
         ChessGame sg = spectators.get(p.getUniqueId());
         if (sg != null) {
             sg.removeSpectator(p);
+        }
+    }
+
+    @EventHandler
+    public void onPlayerDropItem(PlayerDropItemEvent e) {
+        Player p = e.getPlayer();
+        // Block dropping while player has a board open (or is spectating).
+        if (activeGames.containsKey(p.getUniqueId()) || spectators.containsKey(p.getUniqueId())) {
+            ItemStack dropped = e.getItemDrop().getItemStack();
+            if (dropped != null && dropped.hasItemMeta() && dropped.getItemMeta().getPersistentDataContainer().has(PIECE_KEY, PersistentDataType.STRING)) {
+                e.setCancelled(true);
+                p.sendMessage(ChatColor.RED + "You can't drop chess pieces while the board is open.");
+                return;
+            }
+            // block all drops to avoid accidental loss/duplication while board open
+            e.setCancelled(true);
+            p.sendMessage(ChatColor.RED + "You can't drop items while the chess board is open.");
+        }
+    }
+
+    @EventHandler
+    public void onInventoryCreative(InventoryCreativeEvent e) {
+        HumanEntity he = e.getWhoClicked();
+        if (!(he instanceof Player)) return;
+        Player p = (Player) he;
+        // Prevent creative inventory actions while board is open
+        if (activeGames.containsKey(p.getUniqueId()) || spectators.containsKey(p.getUniqueId())) {
+            e.setCancelled(true);
+            p.sendMessage(ChatColor.RED + "You cannot use the creative inventory while the chess board is open.");
+            return;
+        }
+        // Also prevent placing items that carry the PIECE_KEY via creative
+        ItemStack current = e.getCursor();
+        if (current != null && current.hasItemMeta() && current.getItemMeta().getPersistentDataContainer().has(PIECE_KEY, PersistentDataType.STRING)) {
+            e.setCancelled(true);
+        }
+    }
+
+    @EventHandler
+    public void onEntityPickupItem(EntityPickupItemEvent e) {
+        ItemStack it = e.getItem().getItemStack();
+        if (it != null && it.hasItemMeta() && it.getItemMeta().getPersistentDataContainer().has(PIECE_KEY, PersistentDataType.STRING)) {
+            // Prevent pickup of any dropped chess piece, and remove the entity to avoid world duplication
+            e.setCancelled(true);
+            try {
+                e.getItem().remove();
+            } catch (Exception ignored) {}
         }
     }
 
@@ -1525,7 +1583,7 @@ public class ChessPlugin extends JavaPlugin implements Listener {
             if (whiteIsAI || blackIsAI) {
                 sendBoth(ChatColor.GRAY + "You are " + (whiteIsAI ? "Black" : "White") + " vs AI (" + aiDifficulty.label + "). Ratings are not affected.");
             } else {
-                sendBoth(ChatColor.GRAY + "White " + white.getName() + " [" + plugin.eloManager.getRating(white.getUniqueId(), cat) + "] vs Black " + black.getName() + " [" + plugin.eloManager.getRating(black.getUniqueId(), cat) + "]");
+                sendBoth(ChatColor.GRAY + "White " + white.getName() + " [" + plugin.eloManager.getRating(white.getUniqueId(), cat) + "] vs Black " + black.getName() + " [" + plugin.eloManager.g[...]
             }
             updateAllInventories();
             maybeScheduleAI();
@@ -1616,308 +1674,6 @@ public class ChessPlugin extends JavaPlugin implements Listener {
             }
         }
 
-        void giveWinReward(GameResult result) {
-            if (!plugin.getConfig().getBoolean("win-reward.enabled", true)) return;
-            if (puzzleMode) return;
-            if ((whiteIsAI || blackIsAI) && !plugin.getConfig().getBoolean("win-reward.ai-games", false)) return;
-            if (result != GameResult.WHITE_WIN && result != GameResult.BLACK_WIN) return;
-            Economy econ = plugin.getEconomy();
-            if (econ == null) return;
-            double amount = plugin.getConfig().getDouble("win-reward.amount", 100.0);
-            if (amount <= 0) return;
-            Player winner = result == GameResult.WHITE_WIN ? white : black;
-            econ.depositPlayer(Bukkit.getOfflinePlayer(winner.getUniqueId()), amount);
-            sendBoth(ChatColor.GOLD + "Win reward: " + econ.format(amount) + " paid to " + sideName(result == GameResult.WHITE_WIN) + ".");
-        }
-
-        void applyElo(GameResult result) {
-            if (whiteIsAI || blackIsAI) return;
-            String cat = categoryFor(minutes);
-            if (result == GameResult.DRAW) {
-                EloManager.RatingChange[] ch = plugin.eloManager.applyResult(white.getUniqueId(), black.getUniqueId(), 0.5, cat);
-                sendRatingChange(white, ch[0]);
-                sendRatingChange(black, ch[1]);
-            } else if (result == GameResult.WHITE_WIN) {
-                EloManager.RatingChange[] ch = plugin.eloManager.applyResult(white.getUniqueId(), black.getUniqueId(), 1.0, cat);
-                sendRatingChange(white, ch[0]);
-                sendRatingChange(black, ch[1]);
-            } else if (result == GameResult.BLACK_WIN) {
-                EloManager.RatingChange[] ch = plugin.eloManager.applyResult(black.getUniqueId(), white.getUniqueId(), 1.0, cat);
-                sendRatingChange(black, ch[0]);
-                sendRatingChange(white, ch[1]);
-            }
-        }
-
-        void sendRatingChange(Player p, EloManager.RatingChange c) {
-            if (p == null || !p.isOnline() || c == null) return;
-            String sign = c.delta >= 0 ? "+" : "";
-            p.sendMessage(ChatColor.GRAY + "Rating (" + timeControlName().toLowerCase() + "): " + c.oldRating + " -> " + c.newRating + " (" + sign + c.delta + ")");
-        }
-
-        void onPlayerQuit(Player p) {
-            if (!running) return;
-            if (puzzleMode) {
-                endGame("You left the daily puzzle.", GameResult.ABANDONED);
-                return;
-            }
-            if (p.getUniqueId().equals(white.getUniqueId())) {
-                endGame(sideName(false) + " wins (opponent disconnected)", GameResult.BLACK_WIN);
-            } else {
-                endGame(sideName(true) + " wins (opponent disconnected)", GameResult.WHITE_WIN);
-            }
-        }
-
-        void onClose(Player p) {
-            // closing a puzzle board counts as giving up (prevents orphaned games)
-            if (puzzleMode && running) {
-                giveUpPuzzle(p);
-                return;
-            }
-            // discard any pending promotion if the promoting player leaves the view
-            if (pendingPromotion != null && promotionPlayer != null && promotionPlayer.equals(p.getUniqueId())) {
-                pendingPromotion = null;
-                promotionPlayer = null;
-            }
-            // restore player's inventory when they close the board; game continues
-            SavedInventory s = saved.remove(p.getUniqueId());
-            if (s != null) {
-                s.restore(p);
-                p.sendMessage(ChatColor.GRAY + "Your inventory has been restored. Reopen the board to continue.");
-            }
-        }
-
-        void sendBoth(String s) {
-            if (!whiteIsAI && white.isOnline()) white.sendMessage(s);
-            if (!blackIsAI && black.isOnline()) black.sendMessage(s);
-        }
-
-        String sideName(boolean isWhite) {
-            boolean ai = isWhite ? whiteIsAI : blackIsAI;
-            Player p = isWhite ? white : black;
-            return ai ? "AI" : p.getName();
-        }
-
-        boolean aiToMove() {
-            return (board.whiteToMove && whiteIsAI) || (!board.whiteToMove && blackIsAI);
-        }
-
-        void maybeScheduleAI() {
-            if (!running) return;
-            if (puzzleMode) return;
-            if (aiThinking) return;
-            if (!aiToMove()) return;
-            aiThinking = true;
-            plugin.getServer().getScheduler().runTaskLater(plugin, this::doAIMove, 5L);
-        }
-
-        void doAIMove() {
-            if (!running) return;
-            if (puzzleMode) return;
-            if (!aiToMove()) return;
-            // aiThinking stays true until the move is applied, so tick() cannot re-schedule
-            final ChessBoard snapshot = board.copy();
-            final int[] ldp = lastDoublePawn == null ? null : lastDoublePawn.clone();
-            plugin.getServer().getScheduler().runTaskAsynchronously(plugin, () -> {
-                ChessMove best = new ChessAI().findBestMove(snapshot, ldp, aiDifficulty);
-                plugin.getServer().getScheduler().runTask(plugin, () -> {
-                    aiThinking = false;
-                    if (!running) return;
-                    if (!aiToMove()) return;
-                    if (best == null) {
-                        sendBoth(ChatColor.RED + "AI could not find a move.");
-                        return;
-                    }
-                    sendBoth(ChatColor.GRAY + "AI played " + squareName(best.fromX, best.fromY) + "->" + squareName(best.toX, best.toY)
-                            + (best.promotion ? " (promotes to " + best.promotionTo.name().toLowerCase() + ")" : "") + ".");
-                    completeMove(best, best.promotionTo);
-                });
-            });
-        }
-
-        // Build and open combined view for player
-        void openFor(Player p) {
-            openView(p, viewTitle(), false);
-        }
-
-        // GUI title for the current view (puzzles use their own header)
-        String viewTitle() {
-            if (puzzleMode) return ChatColor.LIGHT_PURPLE + "Daily Puzzle #" + (puzzleDay + 1);
-            return title;
-        }
-
-        // Build and open combined view for a player or spectator (read-only board, own controls)
-        void openView(Player p, String viewTitle, boolean spectator) {
-            if (!p.isOnline()) return;
-            // Save current inventory if we haven't already
-            if (!saved.containsKey(p.getUniqueId())) {
-                saved.put(p.getUniqueId(), SavedInventory.save(p));
-            }
-            // Build top inventory (54)
-            Inventory inv = Bukkit.createInventory(null, 54, viewTitle);
-            // fill top 4 ranks into chest top:
-            // top area: guiRow 0..3, col 0..7 -> boardRow = guiRow, boardCol = col
-            for (int guiRow = 0; guiRow < 4; guiRow++) {
-                for (int guiCol = 0; guiCol < 8; guiCol++) {
-                    int slot = guiRow * 9 + guiCol; // col 8 reserved for controls
-                    ChessPiece piece = board.getPiece(guiRow, guiCol);
-                    inv.setItem(slot, toItemFor(piece));
-                }
-                // control column at col 8
-                int ctrlSlot = guiRow * 9 + 8;
-                inv.setItem(ctrlSlot, createInfo(infoText(guiRow, spectator)));
-            }
-            // bottom chest row: controls
-            renderControls(inv, p, spectator);
-
-            // Apply bottom 4 ranks into player's own visible inventory slots:
-            // bottomRow 0..3 maps to board rows 4..7
-            // PlayerInventory slot mapping:
-            // hotbar: 0..8 (we'll use 0..7)
-            // main rows: 9..17, 18..26, 27..35
-            PlayerInventory pinv = p.getInventory();
-            // prepare a clean copy of the saved inventory contents as base then overwrite the controlled slots
-            // Clear the 32 slots we will write to, then set them
-            // bottomRow 0 -> main row 1 (slots 9..16)
-            // bottomRow 1 -> main row 2 (slots 18..25)
-            // bottomRow 2 -> main row 3 (slots 27..34)
-            // bottomRow 3 -> hotbar (slots 0..7)
-            // For each bottomRow
-            for (int br = 0; br < 4; br++) {
-                int boardRow = 4 + br;
-                for (int col = 0; col < 8; col++) {
-                    ItemStack item = toItemFor(board.getPiece(boardRow, col));
-                    int invIndex;
-                    if (br == 3) { // hotbar
-                        invIndex = col; // 0..7
-                    } else {
-                        invIndex = 9 + br * 9 + col; // br 0 -> 9..16, br1->18..25, br2->27..34 (works since 9 + br*9)
-                        // Note: for br=0 -> 9 + 0 + col = 9..16 ; br=1 -> 18..25 ; br=2 -> 27..34
-                    }
-                    pinv.setItem(invIndex, item);
-                }
-            }
-
-            // Finally open the chest for the player
-            p.openInventory(inv);
-        }
-
-        // Spectators ----------------------------------------------------------
-
-        void addSpectator(Player p) {
-            if (!running) return;
-            if (spectators.containsKey(p.getUniqueId())) return;
-            String base = "Spectating: " + sideName(true) + " vs " + sideName(false);
-            if (base.length() > 30) base = base.substring(0, 30);
-            spectatorTitle = ChatColor.DARK_AQUA + base;
-            spectators.put(p.getUniqueId(), p);
-            plugin.spectators.put(p.getUniqueId(), this);
-            openView(p, spectatorTitle, true);
-            p.sendMessage(ChatColor.AQUA + "You are now spectating " + sideName(true) + " vs " + sideName(false)
-                    + (bet > 0 && plugin.getEconomy() != null ? " (bet " + plugin.getEconomy().format(bet) + ")" : "") + ".");
-            p.sendMessage(ChatColor.GRAY + "Close the board to stop spectating.");
-        }
-
-        void removeSpectator(Player p) {
-            if (!spectators.containsKey(p.getUniqueId()) && !plugin.spectators.containsKey(p.getUniqueId())) return;
-            spectators.remove(p.getUniqueId());
-            plugin.spectators.remove(p.getUniqueId());
-            SavedInventory s = saved.remove(p.getUniqueId());
-            if (s != null && p.isOnline()) s.restore(p);
-            p.sendMessage(ChatColor.GRAY + "You are no longer spectating.");
-        }
-
-        void handleSpectatorClick(Player p, InventoryClickEvent e) {
-            int raw = e.getRawSlot();
-            if (raw >= 45 && raw <= 53) {
-                ItemStack cur = e.getCurrentItem();
-                if (cur == null || !cur.hasItemMeta()) return;
-                String name = ChatColor.stripColor(cur.getItemMeta().getDisplayName());
-                switch (name) {
-                    case "Flip":
-                        openView(p, spectatorTitle, true);
-                        return;
-                    case "Info":
-                        p.sendMessage(ChatColor.GRAY + "Spectating " + sideName(true) + " vs " + sideName(false)
-                                + " | " + formatTime(whiteTime) + " - " + formatTime(blackTime)
-                                + (bet > 0 && plugin.getEconomy() != null ? " | Bet: " + plugin.getEconomy().format(bet) : ""));
-                        return;
-                    case "Close":
-                        p.closeInventory();
-                        return;
-                }
-            }
-            // all other clicks on the spectator board are ignored (event already cancelled)
-        }
-
-        private ItemStack createButton(Material mat, String name) {
-            ItemStack it = new ItemStack(mat);
-            ItemMeta m = it.getItemMeta();
-            m.setDisplayName(name);
-            it.setItemMeta(m);
-            return it;
-        }
-
-        private ItemStack createInfo(String text) {
-            ItemStack info = new ItemStack(Material.PAPER);
-            ItemMeta meta = info.getItemMeta();
-            meta.setDisplayName(text);
-            info.setItemMeta(meta);
-            return info;
-        }
-
-        private void renderControls(Inventory top, Player p, boolean spectator) {
-            top.setItem(45, createButton(Material.ARROW, ChatColor.GREEN + "Flip"));
-            if (spectator) {
-                top.setItem(51, createButton(Material.PAPER, ChatColor.AQUA + "Info"));
-                top.setItem(53, createButton(Material.OAK_SIGN, ChatColor.GRAY + "Close"));
-                return;
-            }
-            if (puzzleMode) {
-                top.setItem(46, createButton(Material.BARRIER, ChatColor.RED + "Give Up"));
-                top.setItem(47, createButton(Material.CLOCK, ChatColor.GOLD + "Hint"));
-                top.setItem(51, createButton(Material.PAPER, ChatColor.AQUA + "Info"));
-                top.setItem(53, createButton(Material.OAK_SIGN, ChatColor.GRAY + "Close"));
-                return;
-            }
-            top.setItem(46, createButton(Material.BARRIER, ChatColor.RED + "Resign"));
-            top.setItem(47, createButton(Material.CLOCK, ChatColor.GOLD + "Time"));
-            boolean pendingToMe = drawOfferFrom != null && !drawOfferFrom.equals(p.getUniqueId());
-            if (pendingToMe) {
-                top.setItem(48, createButton(Material.WRITABLE_BOOK, ChatColor.GREEN + "Accept Draw"));
-                top.setItem(49, createButton(Material.BARRIER, ChatColor.GRAY + "Deny Draw"));
-            } else {
-                top.setItem(48, createButton(Material.WRITABLE_BOOK, ChatColor.YELLOW + "Offer Draw"));
-            }
-            if (whiteIsAI || blackIsAI) {
-                top.setItem(50, createButton(Material.ARROW, ChatColor.AQUA + "Undo"));
-            }
-            top.setItem(51, createButton(Material.PAPER, ChatColor.AQUA + "Info"));
-            top.setItem(52, createButton(Material.BOOK, ChatColor.GOLD + "Moves"));
-            top.setItem(53, createButton(Material.OAK_SIGN, ChatColor.GRAY + "Close"));
-        }
-
-        private String infoText(int guiRow, boolean spectator) {
-            if (puzzleMode) {
-                if (guiRow == 0) return ChatColor.LIGHT_PURPLE + "Daily Puzzle #" + (puzzleDay + 1);
-                if (guiRow == 1) return ChatColor.AQUA + puzzleTitle;
-                if (guiRow == 2) return ChatColor.YELLOW + "Turn: " + (board.whiteToMove ? "White" : "Black");
-                return ChatColor.GRAY + "Mate in " + puzzleMateIn + " | Tries: " + puzzleAttempts;
-            }
-            if (guiRow == 0) return ChatColor.AQUA + "White: " + (spectator ? sideName(true) : formatTime(whiteTime));
-            if (guiRow == 1) return ChatColor.AQUA + "Black: " + (spectator ? sideName(false) : formatTime(blackTime));
-            if (guiRow == 2) return ChatColor.YELLOW + "Turn: " + (board.whiteToMove ? "White" : "Black");
-            return spectator ? ChatColor.GRAY + "Spectating" : ChatColor.GRAY + "" + minutes + "m " + timeControlName();
-        }
-
-        private String formatTime(int secs) {
-            int m = secs / 60;
-            int s = secs % 60;
-            return String.format("%d:%02d", m, s);
-        }
-
-        private ItemStack toItemFor(ChessPiece p) {
-            return toItemFor(p, false);
-        }
 
         private ItemStack toItemFor(ChessPiece p, boolean glow) {
             if (p == null) return new ItemStack(Material.GRAY_STAINED_GLASS_PANE);
@@ -3357,7 +3113,7 @@ public class ChessPlugin extends JavaPlugin implements Listener {
         void resetInitialPosition() {
             for (int x=0;x<8;x++) for (int y=0;y<8;y++) b[x][y]=null;
             for (int y=0;y<8;y++) setPiece(1,y,new ChessPiece(Color.WHITE, ChessPieceType.PAWN,1,y));
-            for (int y=0;y<8;y++) setPiece(6,y,new ChessPiece(Color.BLACK, ChessPieceType.PAWN,6,y));
+            for (int y=0;y<8;y++) setPiece(6,y,new ChessPiece(Color.BLACK,ChessPieceType.PAWN,6,y));
             setPiece(0,0,new ChessPiece(Color.WHITE,ChessPieceType.ROOK,0,0));
             setPiece(0,7,new ChessPiece(Color.WHITE,ChessPieceType.ROOK,0,7));
             setPiece(7,0,new ChessPiece(Color.BLACK,ChessPieceType.ROOK,7,0));
