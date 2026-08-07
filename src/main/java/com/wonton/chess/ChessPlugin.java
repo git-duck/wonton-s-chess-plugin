@@ -1583,7 +1583,7 @@ public class ChessPlugin extends JavaPlugin implements Listener {
             if (whiteIsAI || blackIsAI) {
                 sendBoth(ChatColor.GRAY + "You are " + (whiteIsAI ? "Black" : "White") + " vs AI (" + aiDifficulty.label + "). Ratings are not affected.");
             } else {
-                sendBoth(ChatColor.GRAY + "White " + white.getName() + " [" + plugin.eloManager.getRating(white.getUniqueId(), cat) + "] vs Black " + black.getName() + " [" + plugin.eloManager.g[...]
+               sendBoth(ChatColor.GRAY + "White " + white.getName() + " [" + plugin.eloManager.getRating(white.getUniqueId(), cat) + "] vs Black " + black.getName() + " [" + plugin.eloManager.getRating(black.getUniqueId(), cat) + "]");
             }
             updateAllInventories();
             maybeScheduleAI();
