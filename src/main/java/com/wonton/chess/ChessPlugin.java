@@ -222,7 +222,7 @@ public class ChessPlugin extends JavaPlugin implements Listener {
                         + ChatColor.YELLOW + "! Type " + ChatColor.AQUA + "/chessaccept " + ChatColor.YELLOW + "to accept or " + ChatColor.RED + "/chessdeny" + ChatColor.YELLOW + " to deny.");
             } else {
                 p.sendMessage(ChatColor.GREEN + "Challenge sent to " + target.getName() + " (" + tc + " min). Expires in 30s.");
-                target.sendMessage(ChatColor.YELLOW + p.getName() + " has challenged you to a " + tc + "m chess game! Type " + ChatColor.AQUA + "/chessaccept " + ChatColor.YELLOW + "to accept or " + ChatColor.RED + "/chessdeny" + ChatColor.YELLOW + " to deny.");
+                target.sendMessage(ChatColor.YELLOW + p.getName() + " has challenged you to a " + tc + "m chess game! Type " + ChatColor.AQUA + "/chessaccept " + ChatColor.YELLOW + "to accept or [...]
             }
             return true;
         }
@@ -844,7 +844,7 @@ public class ChessPlugin extends JavaPlugin implements Listener {
                             sb.append("\n").append(ChatColor.GRAY).append("  Admin: /chesstourney create");
                         }
                     } else if (tournament.state == TournamentManager.State.LOBBY) {
-                        sb.append("\n").append(ChatColor.GREEN).append("  Lobby open (").append(tournament.players.size()).append(" player").append(tournament.players.size() == 1 ? "" : "s").append(",");
+                        sb.append("\n").append(ChatColor.GREEN).append("  Lobby open (").append(tournament.players.size()).append(" player").append(tournament.players.size() == 1 ? "" : "s").appe[...]
                         for (UUID id : tournament.players) {
                             Player pl = Bukkit.getPlayer(id);
                             sb.append("\n").append(ChatColor.GRAY).append("    - ").append(pl != null ? pl.getName() : "?");
@@ -1583,7 +1583,10 @@ public class ChessPlugin extends JavaPlugin implements Listener {
             if (whiteIsAI || blackIsAI) {
                 sendBoth(ChatColor.GRAY + "You are " + (whiteIsAI ? "Black" : "White") + " vs AI (" + aiDifficulty.label + "). Ratings are not affected.");
             } else {
-                sendBoth(ChatColor.GRAY + "White " + white.getName() + " [" + plugin.eloManager.getRating(white.getUniqueId(), cat) + "] vs Black " + black.getName() + " [" + plugin.eloManager.g[...]
+                String whiteRating = String.valueOf(plugin.eloManager.getRating(white.getUniqueId(), cat));
+                String blackRating = String.valueOf(plugin.eloManager.getRating(black.getUniqueId(), cat));
+                String matchInfo = ChatColor.GRAY + "White " + white.getName() + " [" + whiteRating + "] vs Black " + black.getName() + " [" + blackRating + "].";
+                sendBoth(matchInfo);
             }
             updateAllInventories();
             maybeScheduleAI();
