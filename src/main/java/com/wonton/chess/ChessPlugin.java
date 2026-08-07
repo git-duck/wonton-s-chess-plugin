@@ -224,7 +224,7 @@ public class ChessPlugin extends JavaPlugin implements Listener {
                         + ChatColor.YELLOW + "! Type " + ChatColor.AQUA + "/chessaccept " + ChatColor.YELLOW + "to accept or " + ChatColor.RED + "/chessdeny" + ChatColor.YELLOW + " to deny.");
             } else {
                 p.sendMessage(ChatColor.GREEN + "Challenge sent to " + target.getName() + " (" + tc + " min). Expires in 30s.");
-                target.sendMessage(ChatColor.YELLOW + p.getName() + " has challenged you to a " + tc + "m chess game! Type " + ChatColor.AQUA + "/chessaccept " + ChatColor.YELLOW + "to accept or [...]");
+                target.sendMessage(ChatColor.YELLOW + p.getName() + " has challenged you to a " + tc + "m chess game! Type " + ChatColor.AQUA + "/chessaccept " + ChatColor.YELLOW + "to accept or " + ChatColor.RED + "/chessdeny" + ChatColor.YELLOW + " to deny.");
             }
             return true;
         }
@@ -846,4 +846,24 @@ public class ChessPlugin extends JavaPlugin implements Listener {
                             sb.append("\n").append(ChatColor.GRAY).append("  Admin: /chesstourney create");
                         }
                     } else if (tournament.state == TournamentManager.State.LOBBY) {
-                        sb.append("\n").append(ChatColor.GREEN).append("  Lobby open (").append(tournament.players.size()).append(" player").append(tournament.players.size() == 1 ? "" : "s").appe[...]
+                        sb.append("\n").append(ChatColor.GREEN).append("  Lobby open (").append(tournament.players.size()).append(" player").append(tournament.players.size() == 1 ? "" : "s").append(")");
+                    } else if (tournament.state == TournamentManager.State.IN_PROGRESS) {
+                        sb.append("\n").append(ChatColor.YELLOW).append("  Tournament in progress");
+                    } else if (tournament.state == TournamentManager.State.FINISHED) {
+                        sb.append("\n").append(ChatColor.GRAY).append("  Tournament finished");
+                    }
+                    p.sendMessage(sb.toString());
+                    return true;
+                }
+            }
+        }
+
+        @Override
+        public List<String> onTabComplete(CommandSender sender, Command command, String alias, String[] args) {
+            if (args.length == 1) {
+                return Arrays.asList("create", "join", "leave", "start", "end", "status");
+            }
+            return Collections.emptyList();
+        }
+    }
+}
