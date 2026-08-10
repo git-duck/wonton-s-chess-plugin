@@ -1,31 +1,66 @@
-Copyright (c) 2026 ovrlord_pvp, wonton_stew, ShadowSlayer99, & MrFrenchGuy23. All Rights Reserved. 
+LICENSE
 
-TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION 
+    Copyright (c) 2026 ovrlord_pvp, wonton_stew, ShadowSlayer99, & MrFrenchGuy23.
+    All Rights Reserved.
 
-1. OWNERSHIP 
-The software, source code, and compiled binaries (hereafter referred to as "the Software") contained in this repository are the exclusive intellectual property of the original authors ("wonton_stew" and "MrFrenchGuy23"). 
+TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION
+1. OWNERSHIP
 
-2. LIMITED EVALUATION LICENSE 
-Permission is hereby granted to authorized servers with consent from all developers of this plugin. (from wonton_stew and MrFrenchGuy23 only) 
-- Updraft Network 
-- BrutalitySMP 
-- FlamiumSMP 
+The software, source code, and compiled binaries (“the Software”) in this repository are the exclusive intellectual property of the authors listed in the copyright notice above.
+2. LIMITED EVALUATION LICENSE
 
-3. RESTRICTIONS 
-You may not: 
-- Redistribute, sell, lease, or sub-license the Software to any third party. 
-- Decompile, reverse engineer, or modify the Software without explicit written permission. 
-- Transfer, leak, or expose the Software to third-party developers, outside contractors, or non-administrative players.
-- Run, host, or utilize the Software on a live, public, or commercial Minecraft server without a separate formal deployment agreement signed by the authors. 
+Permission to run or evaluate the Software is granted only to the following servers, and only with explicit written consent from both primary developers (wonton_stew and MrFrenchGuy23):
 
-4. REVOCATION OF USAGE RIGHTS 
-The authors reserve the express right to terminate this evaluation license and revoke permission to use, host, or run the Software at any time, for any reason, without prior notice. Upon written or verbal notification of revocation by the authors, you must immediately cease all use of the Software and permanently delete all copies of the source code and compiled binaries from your systems, servers, and storage networks. 
+    Updraft Network
 
-5. NO WARRANTY 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED. IN NO EVENT SHALL THE AUTHORS BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER LIABILITY ARISING FROM, OUT OF, OR IN CONNECTION WITH THE SOFTWARE. 
+    BrutalitySMP
 
-6. Updraft Network 
-Updraft Network holds all rights to use all plugins made under commission and are permitted to access all plugins even if commissioned by another server. However they hold no right to request removal or be the sole cause of removal, unless an administrative figure from their server commits a structural breach of contract, engages in unauthorized distribution of the Software, or displays hostile administration. They hold the right to ask for permission of removal of plugins in a majority vote. 3 out of ovrlord_pvp, wonton_stew, ShadowSlayer99, & MrFrenchGuy23 must agree that removal of plugins are permitted. 
+    FlamiumSMP
 
-7. ARG content 
-ARG content will be periodically added if there is an active ongoing ARG being created, server owners will be notified 24 hours beforehand when ARG updates are committed. All bug fixes and updates will be delivered strictly as pre-compiled, secure binary configurations (.jar), and server management must wait for developers to compile the plugin in a new repository. When the ARG period is over or when all clues have been exhausted all ARG elements will be removed and development of plugins will continue as usual.
+No other server, organization, or individual is permitted to run, host, or evaluate the Software.
+3. RESTRICTIONS
+
+You may not:
+
+    Redistribute, sell, lease, or sub-license the Software.
+
+    Decompile, reverse engineer, or modify the Software without written permission.
+
+    Transfer, leak, or expose the Software to third-party developers, contractors, or non-administrative players.
+
+    Run or host the Software on any public, commercial, or production Minecraft server without a separate written deployment agreement signed by the authors.
+
+4. REVOCATION OF USAGE RIGHTS
+
+The authors may revoke permission to use, host, or run the Software at any time, for any reason.
+Revocation will be delivered via written electronic notice (Discord, email, or similar).
+Upon receiving notice, you must immediately cease all use of the Software and permanently delete all copies, including binaries and source code.
+5. NO WARRANTY
+
+THE SOFTWARE IS PROVIDED “AS IS,” WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED.
+THE AUTHORS SHALL NOT BE LIABLE FOR ANY DAMAGES OR CLAIMS ARISING FROM USE OF THE SOFTWARE.
+6. SPECIAL TERMS FOR UPDRAFT NETWORK
+
+Updraft Network is permitted to use all plugins commissioned from the authors and may access plugins commissioned by other servers.
+However, Updraft Network:
+
+    May not demand removal of any plugin unless a breach of contract, unauthorized distribution, or hostile administration occurs.
+
+    May request plugin removal, but approval requires a majority vote (3 out of 4) from:
+
+        ovrlord_pvp
+
+        wonton_stew
+
+        ShadowSlayer99
+
+        MrFrenchGuy23
+
+Updraft Network holds usage rights, not ownership rights.
+7. ARG CONTENT POLICY
+
+ARG-related content may be added when an active ARG is in progress.
+Server owners will receive 24 hours’ written notice before ARG updates are committed.
+All updates, fixes, and ARG content will be delivered as pre-compiled .jar binaries.
+Server owners must wait for developers to compile and publish updated builds.
+When the ARG concludes, all ARG elements will be removed and normal development will resume.
