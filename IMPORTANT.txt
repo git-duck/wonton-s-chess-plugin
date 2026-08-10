@@ -64,3 +64,52 @@ Server owners will receive 24 hours’ written notice before ARG updates are com
 All updates, fixes, and ARG content will be delivered as pre-compiled .jar binaries.
 Server owners must wait for developers to compile and publish updated builds.
 When the ARG concludes, all ARG elements will be removed and normal development will resume.
+8. DEFINITIONS
+
+“Software” refers to all source code, compiled binaries, configuration files, and related materials in this repository.
+“Authorized Server” refers only to the specific server entities listed in Section 2.
+“Developers” refers exclusively to the authors listed in the copyright notice.
+“Administrative Player” refers to any individual with access to server files, plugin configurations, or console permissions.
+Pseudonymous Authorship  
+Some developer identities listed in this license are pseudonyms used for authorship and licensing purposes. These identities correspond to real individuals who retain full legal ownership of the Software.
+9. SCOPE OF PERMISSION
+
+Permission applies only to the specific server entities listed in Section 2 and does not extend to successor organizations, renamed servers, merged servers, or transferred ownership without explicit written approval from the Developers.
+10. NO TRANSFER OF RIGHTS
+
+Usage rights granted under this license are non-transferable.
+No sale, merger, acquisition, or ownership change may transfer rights to use the Software.
+11. NO DERIVATIVE WORKS
+
+You may not create, publish, or distribute derivative works, including modified versions, forks, patches, or plugins based on the structure, logic, or functionality of the Software.
+12. SURVIVAL
+
+Sections 3, 4, 10, and 11 survive termination of this license and remain in effect indefinitely.
+13. GOVERNING LAW
+
+The Berne Convention for the Protection of Literary and Artistic Works applies to all plugins released by this developer group, ensuring international copyright protection.
+
+This license is governed by the laws of Sri Lanka.
+14. NO IMPLIED LICENSE
+
+Viewing or accessing the Software in a public repository does not grant permission to use, run, modify, fork, or distribute it. All rights not expressly granted in this license are reserved by the Developers.
+15. NO PUBLIC FORKING
+
+The Software may not be forked, mirrored, or cloned into public repositories. Any forks automatically created by GitHub’s platform may not be used, modified, distributed, or made public. Forking does not grant any rights to the Software.
+16. ACCEPTANCE OF TERMS
+
+By downloading, running, evaluating, or accessing the Software or its compiled binaries, you acknowledge and agree to be bound by all terms of this license.
+17. ENTIRE AGREEMENT
+
+This license constitutes the entire agreement between the Developers and any Authorized Server regarding the Software. No verbal statements, external messages, or informal agreements modify or override the terms contained herein.
+18. SEVERABILITY
+
+If any provision of this license is found to be invalid, unlawful, or unenforceable, the remaining provisions shall continue in full force and effect.
+19. NO WAIVER OF RIGHTS
+
+Failure by the Developers to enforce any provision of this license does not constitute a waiver of that provision or any other rights. All rights and restrictions contained in this license remain fully enforceable at all times.
+20. CONTACT AND AUTHORIZATION CHANNELS
+
+All authorization, consent, revocation notices, and official communication regarding the Software must be delivered through verified developer channels (Discord, email, or other written electronic methods).
+Only the Developers listed in the copyright notice may grant or revoke permissions.
+No other individual, moderator, administrator, or third party may issue binding decisions regarding the Software.
