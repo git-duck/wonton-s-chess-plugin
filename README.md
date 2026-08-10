@@ -5,7 +5,7 @@ A fully interactive 8x8 Chess engine built natively for Minecraft servers (Paper
 Current state is debugging some glitches we found.
 ## Authors & Credits
 
-* **[wonton_stew](https://github.com)** — *Original Creator*
+* **[wonton_stew](https://github.com/git-duck)** — *Original Creator*
   source code mine :P (oh god that ":P" looks scary XD) hmm nevermind it just looks scary in the font github uses, in the read me preview it looks fine, the font is consolas right?
 * **[MrFrenchGuy23](https://github.com/MrFrenchGuy23)** — 
 
