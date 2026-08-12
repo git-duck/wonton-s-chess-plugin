@@ -16,19 +16,21 @@ gambit:
 titles:
   - threshold: 800
     name: "Novice"
-  - threshold: 1000
-    name: "Amateur"
   - threshold: 1200
-    name: "Club Player"
-  - threshold: 1400
-    name: "Expert"
+    name: "Intermediate"
   - threshold: 1600
-    name: "Candidate Master"
+    name: "Advanced"
   - threshold: 1800
-    name: "Master"
+    name: "Expert"
   - threshold: 2000
-    name: "International Master"
+    name: "National Master"
+  - threshold: 2200
+    name: "Candidate Master"
+  - threshold: 2300
+    name: "FIDE Master"
   - threshold: 2400
+    name: "International Master"
+  - threshold: 2500
     name: "Grandmaster"
 
 matchmaking:
