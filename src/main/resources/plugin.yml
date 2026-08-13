@@ -5,7 +5,7 @@ api-version: 1.20
 softdepend: [Vault]
 commands:
   chess:
-    description: Send a chess challenge: /chess <player> [1|3|5|10[+inc]] [bet] [gambit]
+    description: "Send a chess challenge: /chess <player> [1|3|5|10[+inc]] [bet] [gambit]"
     usage: /chess <player> [1|3|5|10[+inc]] [bet] [gambit]
     permission: chess.use
   chessaccept:
@@ -20,20 +20,16 @@ commands:
     description: Show a player's chess ratings
     usage: /chessrating [player]
     permission: chess.use
-  chesstoggle:
-    description: Toggles the chess plugin on or off
-    usage: /chesstoggle
-    permission: chess.admin
   chessai:
-    description: Play a game against the AI: /chessai [easy|casual|medium|hard|extreme] [1|3|5|10] [white|black]
+    description: "Play a game against the AI: /chessai [easy|casual|medium|hard|extreme] [1|3|5|10] [white|black]"
     usage: /chessai [easy|casual|medium|hard|extreme] [1|3|5|10] [white|black]
     permission: chess.use
   chessspectate:
-    description: Spectate an ongoing chess game: /chessspectate <player>
+    description: "Spectate an ongoing chess game: /chessspectate <player>"
     usage: /chessspectate <player>
     permission: chess.use
   chesspuzzle:
-    description: Play today's daily puzzle (mate in one/two/three): /chesspuzzle
+    description: "Play today's daily puzzle (mate in one/two/three): /chesspuzzle"
     usage: /chesspuzzle [list|reload|play <index>]
     permission: chess.use
   chessboard:
@@ -41,19 +37,19 @@ commands:
     usage: /chessboard
     permission: chess.use
   chessmatch:
-    description: Join or leave the matchmaking queue: /chessmatch [bullet|blitz|rapid]
+    description: "Join or leave the matchmaking queue: /chessmatch [bullet|blitz|rapid]"
     usage: /chessmatch [bullet|blitz|rapid]
     permission: chess.use
   chessleaderboard:
-    description: Show the top chess players: /chessleaderboard [bullet|blitz|rapid]
+    description: "Show the top chess players: /chessleaderboard [bullet|blitz|rapid]"
     usage: /chessleaderboard [bullet|blitz|rapid]
     permission: chess.use
   chessreplay:
-    description: Show recent games or replay one: /chessreplay [index] [player]
+    description: "Show recent games or replay one: /chessreplay [index] [player]"
     usage: /chessreplay [index] [player]
     permission: chess.use
   chesstourney:
-    description: Create, join, and run a tournament: /chesstourney [create|join|leave|start|end|status]
+    description: "Create, join, and run a tournament: /chesstourney [create|join|leave|start|end|status]"
     usage: /chesstourney [create|join|leave|start|end|status]
     permission: chess.use
 permissions:

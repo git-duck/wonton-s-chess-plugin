@@ -13,10 +13,10 @@ import org.bukkit.entity.HumanEntity;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
-import org.bukkit.event.inventory.*;
-import org.bukkit.event.player.PlayerQuitEvent;
-import org.bukkit.event.player.PlayerDropItemEvent;
 import org.bukkit.event.entity.EntityPickupItemEvent;
+import org.bukkit.event.inventory.*;
+import org.bukkit.event.player.PlayerDropItemEvent;
+import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.inventory.*;
 import org.bukkit.inventory.meta.ItemMeta;
 import org.bukkit.configuration.file.YamlConfiguration;
@@ -26,11 +26,10 @@ import org.bukkit.plugin.RegisteredServiceProvider;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.bukkit.scheduler.BukkitTask;
 
-import net.milkbowl.vault.economy.Economy;
-
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.IOException;
+import java.lang.reflect.Constructor;
 import java.time.LocalDate;
 import java.time.ZoneOffset;
 import java.util.*;
@@ -58,8 +57,7 @@ public class ChessPlugin extends JavaPlugin implements Listener {
     private ChallengeManager challengeManager;
     private EloManager eloManager;
     private StatsManager statsManager;
-    private Economy economy;
-    private boolean enabled = true;
+    private BalanceService economy;
     private final Map<UUID, ChessGame> activeGames = new ConcurrentHashMap<>();
     // spectators: player UUID -> game they are watching
     private final Map<UUID, ChessGame> spectators = new ConcurrentHashMap<>();
@@ -84,7 +82,6 @@ public class ChessPlugin extends JavaPlugin implements Listener {
         Objects.requireNonNull(this.getCommand("chessaccept")).setExecutor(new ChessAcceptCommand());
         Objects.requireNonNull(this.getCommand("chessdeny")).setExecutor(new ChessDenyCommand());
         Objects.requireNonNull(this.getCommand("chessrating")).setExecutor(new ChessRatingCommand());
-        Objects.requireNonNull(this.getCommand("chesstoggle")).setExecutor(new ChessToggleCommand());
         Objects.requireNonNull(this.getCommand("chessai")).setExecutor(new ChessAiCommand());
         Objects.requireNonNull(this.getCommand("chessspectate")).setExecutor(new ChessSpectateCommand());
         Objects.requireNonNull(this.getCommand("chesspuzzle")).setExecutor(new ChessPuzzleCommand());
@@ -98,21 +95,31 @@ public class ChessPlugin extends JavaPlugin implements Listener {
     }
 
     private void setupEconomy() {
-        if (Bukkit.getPluginManager().getPlugin("Vault") == null) {
+        try {
+            // Load Vault reflectively so the plugin works even without Vault installed.
+            Class<?> economyClass = Class.forName("net.milkbowl.vault.economy.Economy");
+            @SuppressWarnings("unchecked")
+            RegisteredServiceProvider<?> rsp = Bukkit.getServicesManager().getRegistration((Class) economyClass);
+            if (rsp == null) {
+                getLogger().warning("No economy provider registered via Vault - currency betting disabled.");
+                return;
+            }
+            Class<?> bridge = Class.forName("com.wonton.chess.VaultBalanceService");
+            Constructor<?> ctor = bridge.getConstructor(Object.class);
+            economy = (BalanceService) ctor.newInstance(rsp.getProvider());
+            getLogger().info("Hooked into economy: " + economy.name());
+        } catch (Throwable t) {
             getLogger().warning("Vault not found - currency betting disabled.");
-            return;
         }
-        RegisteredServiceProvider<Economy> rsp = Bukkit.getServicesManager().getRegistration(Economy.class);
-        if (rsp == null) {
-            getLogger().warning("No economy provider registered via Vault - currency betting disabled.");
-            return;
-        }
-        economy = rsp.getProvider();
-        getLogger().info("Hooked into economy: " + economy.getName());
     }
 
-    public Economy getEconomy() {
+    public BalanceService getEconomy() {
         return economy;
+    }
+
+    // Whether currency betting on games is allowed (config: betting.enabled)
+    public boolean bettingEnabled() {
+        return getConfig().getBoolean("betting.enabled", true);
     }
 
     public StatsManager getStatsManager() {
@@ -141,10 +148,6 @@ public class ChessPlugin extends JavaPlugin implements Listener {
                 return true;
             }
             Player p = (Player) sender;
-            if (!enabled) {
-                p.sendMessage(ChatColor.RED + "Chess is currently disabled.");
-                return true;
-            }
             if (args.length < 1 || args.length > 4) {
                 p.sendMessage(ChatColor.RED + "Usage: /chess <player> [1|3|5|10[+inc]] [bet] [gambit]");
                 return true;
@@ -172,6 +175,10 @@ public class ChessPlugin extends JavaPlugin implements Listener {
             double bet = 0;
             boolean gambit = false;
             if (args.length >= 3) {
+                if (!bettingEnabled()) {
+                    p.sendMessage(ChatColor.RED + "Currency betting is disabled on this server.");
+                    return true;
+                }
                 try {
                     bet = Double.parseDouble(args[2]);
                 } catch (NumberFormatException ex) {
@@ -183,15 +190,19 @@ public class ChessPlugin extends JavaPlugin implements Listener {
                     return true;
                 }
                 if (economy == null) {
-                    p.sendMessage(ChatColor.RED + "No economy plugin is installed, so bets are unavailable.");
+                    p.sendMessage(ChatColor.RED + "No Vault or any economy plugin is installed, so bets are unavailable.");
                     return true;
                 }
                 if (!economy.has(p, bet)) {
-                    p.sendMessage(ChatColor.RED + "You do not have enough money for that bet. Balance: " + economy.format(economy.getBalance(p)));
+                    p.sendMessage(ChatColor.RED + "You do not have enough money for that bet. Balance: " + economy.format(economy.balance(p)));
                     return true;
                 }
             }
             if (args.length == 4) {
+                if (!bettingEnabled()) {
+                    p.sendMessage(ChatColor.RED + "Currency betting is disabled on this server.");
+                    return true;
+                }
                 gambit = args[3].equalsIgnoreCase("gambit");
                 if (!gambit) {
                     p.sendMessage(ChatColor.RED + "Invalid option '" + args[3] + "'. Use 'gambit' to enable gambit mode.");
@@ -270,6 +281,10 @@ public class ChessPlugin extends JavaPlugin implements Listener {
                 return true;
             }
             double bet = challenge.bet;
+            if (bet > 0 && !bettingEnabled()) {
+                bet = 0;
+                accepter.sendMessage(ChatColor.YELLOW + "Currency betting is disabled on this server, so this game will be played without a bet.");
+            }
             if (bet > 0) {
                 if (economy == null) {
                     accepter.sendMessage(ChatColor.RED + "The economy is unavailable; the bet cannot be placed.");
@@ -286,8 +301,8 @@ public class ChessPlugin extends JavaPlugin implements Listener {
                     challenger.sendMessage(ChatColor.RED + accepter.getName() + " could not afford the bet and the challenge was cancelled.");
                     return true;
                 }
-                economy.withdrawPlayer(challenger, bet);
-                economy.withdrawPlayer(accepter, bet);
+                economy.withdraw(challenger, bet);
+                economy.withdraw(accepter, bet);
             }
             ChessGame game = new ChessGame(ChessPlugin.this, challenger, accepter, challenge.minutes, challenge.increment);
             game.bet = bet;
@@ -375,24 +390,6 @@ public class ChessPlugin extends JavaPlugin implements Listener {
         }
     }
 
-    private class ChessToggleCommand implements TabExecutor {
-        @Override
-        public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
-            if (!sender.hasPermission("chess.admin")) {
-                sender.sendMessage(ChatColor.RED + "You do not have permission to toggle the chess plugin.");
-                return true;
-            }
-            enabled = !enabled;
-            getServer().broadcastMessage(ChatColor.AQUA + "Chess is now " + (enabled ? "enabled" : "disabled") + ".");
-            return true;
-        }
-
-        @Override
-        public List<String> onTabComplete(CommandSender sender, Command command, String alias, String[] args) {
-            return Collections.emptyList();
-        }
-    }
-
     private class ChessAiCommand implements TabExecutor {
         @Override
         public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
@@ -401,10 +398,6 @@ public class ChessPlugin extends JavaPlugin implements Listener {
                 return true;
             }
             Player p = (Player) sender;
-            if (!enabled) {
-                p.sendMessage(ChatColor.RED + "Chess is currently disabled.");
-                return true;
-            }
             int minutes = 3;
             boolean humanWhite = true;
             ChessAI.Difficulty difficulty = ChessAI.Difficulty.MEDIUM;
@@ -461,10 +454,6 @@ public class ChessPlugin extends JavaPlugin implements Listener {
                 return true;
             }
             Player p = (Player) sender;
-            if (!enabled) {
-                p.sendMessage(ChatColor.RED + "Chess is currently disabled.");
-                return true;
-            }
             if (args.length != 1) {
                 p.sendMessage(ChatColor.RED + "Usage: /chessspectate <player>");
                 return true;
@@ -512,10 +501,6 @@ public class ChessPlugin extends JavaPlugin implements Listener {
                 return true;
             }
             Player p = (Player) sender;
-            if (!enabled) {
-                p.sendMessage(ChatColor.RED + "Chess is currently disabled.");
-                return true;
-            }
             if (args.length == 0) {
                 startPuzzle(p, Puzzle.today());
                 return true;
@@ -598,10 +583,6 @@ public class ChessPlugin extends JavaPlugin implements Listener {
                 return true;
             }
             Player p = (Player) sender;
-            if (!enabled) {
-                p.sendMessage(ChatColor.RED + "Chess is currently disabled.");
-                return true;
-            }
             ChessGame game = activeGames.get(p.getUniqueId());
             if (game == null) {
                 p.sendMessage(ChatColor.RED + "You are not in a chess game.");
@@ -626,10 +607,6 @@ public class ChessPlugin extends JavaPlugin implements Listener {
                 return true;
             }
             Player p = (Player) sender;
-            if (!enabled) {
-                p.sendMessage(ChatColor.RED + "Chess is currently disabled.");
-                return true;
-            }
             String cat = args.length >= 1 ? args[0].toLowerCase() : "blitz";
             if (!cat.equals("bullet") && !cat.equals("blitz") && !cat.equals("rapid")) {
                 p.sendMessage(ChatColor.RED + "Invalid category. Use bullet, blitz, or rapid.");
@@ -766,10 +743,6 @@ public class ChessPlugin extends JavaPlugin implements Listener {
                 return true;
             }
             Player p = (Player) sender;
-            if (!enabled) {
-                p.sendMessage(ChatColor.RED + "Chess is currently disabled.");
-                return true;
-            }
             String sub = args.length >= 1 ? args[0].toLowerCase() : "status";
             switch (sub) {
                 case "create": {
@@ -846,7 +819,7 @@ public class ChessPlugin extends JavaPlugin implements Listener {
                             sb.append("\n").append(ChatColor.GRAY).append("  Admin: /chesstourney create");
                         }
                     } else if (tournament.state == TournamentManager.State.LOBBY) {
-                        sb.append("\n").append(ChatColor.GREEN).append("  Lobby open (").append(tournament.players.size()).append(" player").append(tournament.players.size() == 1 ? "" : "s").append(").");
+                        sb.append("\n").append(ChatColor.GREEN).append("  Lobby open (").append(tournament.players.size()).append(" player").append(tournament.players.size() == 1 ? "" : "s").append(", need 4 or 8).");
                         for (UUID id : tournament.players) {
                             Player pl = Bukkit.getPlayer(id);
                             sb.append("\n").append(ChatColor.GRAY).append("    - ").append(pl != null ? pl.getName() : "?");
@@ -885,8 +858,7 @@ public class ChessPlugin extends JavaPlugin implements Listener {
         Player p = (Player) he;
         ChessGame g = activeGames.get(p.getUniqueId());
         if (g != null) {
-            // delegate to game; always cancel so no items are moved in board area
-            e.setCancelled(true);
+            // delegate to game; the game decides whether to allow pick-ups (drag support)
             g.onInventoryClick(p, e);
             return;
         }
@@ -902,8 +874,12 @@ public class ChessPlugin extends JavaPlugin implements Listener {
         HumanEntity he = e.getWhoClicked();
         if (!(he instanceof Player)) return;
         Player p = (Player) he;
-        // Prevent dragging items while a player's chess board (or spectator view) is open.
-        if (activeGames.containsKey(p.getUniqueId()) || spectators.containsKey(p.getUniqueId())) {
+        ChessGame g = activeGames.get(p.getUniqueId());
+        if (g != null) {
+            g.onDrag(p, e);
+            return;
+        }
+        if (spectators.containsKey(p.getUniqueId())) {
             e.setCancelled(true);
         }
     }
@@ -924,17 +900,31 @@ public class ChessPlugin extends JavaPlugin implements Listener {
     }
 
     @EventHandler
+    public void onQuit(PlayerQuitEvent e) {
+        Player p = e.getPlayer();
+        ChessGame g = activeGames.get(p.getUniqueId());
+        if (g != null) {
+            g.onPlayerQuit(p);
+        }
+        ChessGame sg = spectators.get(p.getUniqueId());
+        if (sg != null) {
+            sg.removeSpectator(p);
+        }
+    }
+
+    @EventHandler
     public void onPlayerDropItem(PlayerDropItemEvent e) {
         Player p = e.getPlayer();
-        // Block dropping while player has a board open (or is spectating).
+        // Block dropping items while a player has a board open (or is spectating),
+        // otherwise chess pieces (or copies of them) can leak into the world.
         if (activeGames.containsKey(p.getUniqueId()) || spectators.containsKey(p.getUniqueId())) {
             ItemStack dropped = e.getItemDrop().getItemStack();
-            if (dropped != null && dropped.hasItemMeta() && dropped.getItemMeta().getPersistentDataContainer().has(PIECE_KEY, PersistentDataType.STRING)) {
+            if (dropped != null && dropped.hasItemMeta()
+                    && dropped.getItemMeta().getPersistentDataContainer().has(PIECE_KEY, PersistentDataType.STRING)) {
                 e.setCancelled(true);
                 p.sendMessage(ChatColor.RED + "You can't drop chess pieces while the board is open.");
                 return;
             }
-            // block all drops to avoid accidental loss/duplication while board open
             e.setCancelled(true);
             p.sendMessage(ChatColor.RED + "You can't drop items while the chess board is open.");
         }
@@ -945,15 +935,16 @@ public class ChessPlugin extends JavaPlugin implements Listener {
         HumanEntity he = e.getWhoClicked();
         if (!(he instanceof Player)) return;
         Player p = (Player) he;
-        // Prevent creative inventory actions while board is open
+        // Prevent creative inventory actions while the board is open.
         if (activeGames.containsKey(p.getUniqueId()) || spectators.containsKey(p.getUniqueId())) {
             e.setCancelled(true);
             p.sendMessage(ChatColor.RED + "You cannot use the creative inventory while the chess board is open.");
             return;
         }
-        // Also prevent placing items that carry the PIECE_KEY via creative
+        // Also prevent placing items that carry the PIECE_KEY via creative.
         ItemStack current = e.getCursor();
-        if (current != null && current.hasItemMeta() && current.getItemMeta().getPersistentDataContainer().has(PIECE_KEY, PersistentDataType.STRING)) {
+        if (current != null && current.hasItemMeta()
+                && current.getItemMeta().getPersistentDataContainer().has(PIECE_KEY, PersistentDataType.STRING)) {
             e.setCancelled(true);
         }
     }
@@ -961,25 +952,14 @@ public class ChessPlugin extends JavaPlugin implements Listener {
     @EventHandler
     public void onEntityPickupItem(EntityPickupItemEvent e) {
         ItemStack it = e.getItem().getItemStack();
-        if (it != null && it.hasItemMeta() && it.getItemMeta().getPersistentDataContainer().has(PIECE_KEY, PersistentDataType.STRING)) {
-            // Prevent pickup of any dropped chess piece, and remove the entity to avoid world duplication
+        if (it != null && it.hasItemMeta()
+                && it.getItemMeta().getPersistentDataContainer().has(PIECE_KEY, PersistentDataType.STRING)) {
+            // Prevent pickup of any dropped chess piece and remove the entity to avoid duplication.
             e.setCancelled(true);
             try {
                 e.getItem().remove();
-            } catch (Exception ignored) {}
-        }
-    }
-
-    @EventHandler
-    public void onQuit(PlayerQuitEvent e) {
-        Player p = e.getPlayer();
-        ChessGame g = activeGames.get(p.getUniqueId());
-        if (g != null) {
-            g.onPlayerQuit(p);
-        }
-        ChessGame sg = spectators.get(p.getUniqueId());
-        if (sg != null) {
-            sg.removeSpectator(p);
+            } catch (Exception ignored) {
+            }
         }
     }
 
@@ -1046,7 +1026,7 @@ public class ChessPlugin extends JavaPlugin implements Listener {
 
     // Elo ratings (chess.com formula), persisted to ratings.yml
     static class EloManager {
-        private static final int DEFAULT_RATING = 1200;
+        private static final int NORMAL_RATING = 1200;
         private final JavaPlugin plugin;
         private final Map<UUID, Map<String, Rating>> ratings = new ConcurrentHashMap<>();
 
@@ -1059,7 +1039,7 @@ public class ChessPlugin extends JavaPlugin implements Listener {
         int getRating(UUID id, String category) {
             Map<String, Rating> m = ratings.get(id);
             Rating r = m == null ? null : m.get(category);
-            return r == null ? DEFAULT_RATING : r.rating;
+            return r == null ? NORMAL_RATING : r.rating;
         }
 
         int getGames(UUID id, String category) {
@@ -1111,7 +1091,7 @@ public class ChessPlugin extends JavaPlugin implements Listener {
                 Map<String, Rating> m = new HashMap<>();
                 for (String cat : new String[]{"bullet", "blitz", "rapid"}) {
                     Rating r = new Rating();
-                    r.rating = cfg.getInt(key + "." + cat + ".rating", DEFAULT_RATING);
+                    r.rating = cfg.getInt(key + "." + cat + ".rating", NORMAL_RATING);
                     r.games = cfg.getInt(key + "." + cat + ".games", 0);
                     m.put(cat, r);
                 }
@@ -1189,7 +1169,7 @@ public class ChessPlugin extends JavaPlugin implements Listener {
         }
 
         static class Rating {
-            int rating = DEFAULT_RATING;
+            int rating = NORMAL_RATING;
             int games = 0;
         }
 
@@ -1234,8 +1214,8 @@ public class ChessPlugin extends JavaPlugin implements Listener {
         // called when the daily puzzle is solved; streak grows across consecutive UTC days
         void onPuzzleSolved(UUID id, long day) {
             Stats s = get(id);
-            s.solvedTotal++;
             if (s.lastSolvedDay == day) return; // already counted today
+            s.solvedTotal++;
             if (s.lastSolvedDay == day - 1) s.streak++;
             else s.streak = 1;
             s.lastSolvedDay = day;
@@ -1479,6 +1459,8 @@ public class ChessPlugin extends JavaPlugin implements Listener {
         int selectedX = -1, selectedY = -1;
         // track whether player's inventory has been replaced (so we know to restore)
         final Map<UUID, SavedInventory> saved = new HashMap<>();
+        // chest inventory currently open for each player (used for reliable re-renders)
+        final Map<UUID, Inventory> openChests = new HashMap<>();
         // timers
         int whiteTime;
         int blackTime;
@@ -1576,7 +1558,7 @@ public class ChessPlugin extends JavaPlugin implements Listener {
             timerTask = plugin.getServer().getScheduler().runTaskTimer(plugin, this::tick, 20L, 20L);
             String cat = categoryFor(minutes);
             sendBoth(ChatColor.GREEN + "Game started! " + timeControlName() + " (" + minutes + (increment > 0 ? "+" + increment : "") + "m).");
-            if (bet > 0 && plugin.getEconomy() != null) {
+            if (bet > 0 && plugin.getEconomy() != null && plugin.bettingEnabled()) {
                 sendBoth(ChatColor.GOLD + "Bet: " + plugin.getEconomy().format(bet) + " each. Winner takes all.");
             }
             if (gambit) {
@@ -1585,10 +1567,7 @@ public class ChessPlugin extends JavaPlugin implements Listener {
             if (whiteIsAI || blackIsAI) {
                 sendBoth(ChatColor.GRAY + "You are " + (whiteIsAI ? "Black" : "White") + " vs AI (" + aiDifficulty.label + "). Ratings are not affected.");
             } else {
-                String whiteRating = String.valueOf(plugin.eloManager.getRating(white.getUniqueId(), cat));
-                String blackRating = String.valueOf(plugin.eloManager.getRating(black.getUniqueId(), cat));
-                String matchInfo = ChatColor.GRAY + "White " + white.getName() + " [" + whiteRating + "] vs Black " + black.getName() + " [" + blackRating + "].";
-                sendBoth(matchInfo);
+                sendBoth(ChatColor.GRAY + "White " + white.getName() + " [" + plugin.eloManager.getRating(white.getUniqueId(), cat) + "] vs Black " + black.getName() + " [" + plugin.eloManager.getRating(black.getUniqueId(), cat) + "]");
             }
             updateAllInventories();
             maybeScheduleAI();
@@ -1641,9 +1620,10 @@ public class ChessPlugin extends JavaPlugin implements Listener {
             // ensure saved inventories restored (in case close events weren't processed)
             for (UUID id : new ArrayList<>(saved.keySet())) {
                 Player p = Bukkit.getPlayer(id);
-                if (p != null && p.isOnline()) saved.get(id).restore(p);
+                if (p != null) saved.get(id).restore(p);
                 saved.remove(id);
             }
+            openChests.clear();
             plugin.removeGame(this);
             if (onEnd != null) {
                 try {
@@ -1656,7 +1636,8 @@ public class ChessPlugin extends JavaPlugin implements Listener {
 
         void resolveBet(GameResult result) {
             if (bet <= 0) return;
-            Economy econ = plugin.getEconomy();
+            if (!plugin.bettingEnabled()) return;
+            BalanceService econ = plugin.getEconomy();
             if (econ == null) {
                 plugin.getLogger().warning("Cannot settle chess bet of " + bet + ": economy unavailable.");
                 return;
@@ -1665,242 +1646,372 @@ public class ChessPlugin extends JavaPlugin implements Listener {
             OfflinePlayer ow = Bukkit.getOfflinePlayer(white.getUniqueId());
             OfflinePlayer ob = Bukkit.getOfflinePlayer(black.getUniqueId());
             if (result == GameResult.WHITE_WIN) {
-                econ.depositPlayer(ow, bet * 2 * factor);
+                econ.deposit(ow, bet * 2 * factor);
                 sendBoth(ChatColor.GOLD + "Bet settled: " + econ.format(bet * 2 * factor) + " paid to " + sideName(true)
                         + (factor > 1.0 ? " (gambit x" + factor + ")" : "") + ".");
             } else if (result == GameResult.BLACK_WIN) {
-                econ.depositPlayer(ob, bet * 2 * factor);
+                econ.deposit(ob, bet * 2 * factor);
                 sendBoth(ChatColor.GOLD + "Bet settled: " + econ.format(bet * 2 * factor) + " paid to " + sideName(false)
                         + (factor > 1.0 ? " (gambit x" + factor + ")" : "") + ".");
             } else {
-                econ.depositPlayer(ow, bet);
-                econ.depositPlayer(ob, bet);
+                econ.deposit(ow, bet);
+                econ.deposit(ob, bet);
                 sendBoth(ChatColor.GRAY + "Bet refunded: " + econ.format(bet) + " each.");
             }
         }
 
-        // -------------------------------------------------------------------
-        // NOTE: the methods below were missing from the source (deleted by an
-        // automated tool at some point) and have been reconstructed from how
-        // they are called elsewhere in this class/file. Please review, they
-        // are functional but may not match the original implementation
-        // exactly (e.g. exact GUI slot choices, button icons, message wording).
-        // -------------------------------------------------------------------
-
-        String sideName(boolean isWhite) {
-            return isWhite ? "White" : "Black";
+        void giveWinReward(GameResult result) {
+            if (!plugin.getConfig().getBoolean("win-reward.enabled", true)) return;
+            if (puzzleMode) return;
+            if ((whiteIsAI || blackIsAI) && !plugin.getConfig().getBoolean("win-reward.ai-games", false)) return;
+            if (result != GameResult.WHITE_WIN && result != GameResult.BLACK_WIN) return;
+            BalanceService econ = plugin.getEconomy();
+            if (econ == null) return;
+            double amount = plugin.getConfig().getDouble("win-reward.amount", 100.0);
+            if (amount <= 0) return;
+            Player winner = result == GameResult.WHITE_WIN ? white : black;
+            econ.deposit(Bukkit.getOfflinePlayer(winner.getUniqueId()), amount);
+            sendBoth(ChatColor.GOLD + "Win reward: " + econ.format(amount) + " paid to " + sideName(result == GameResult.WHITE_WIN) + ".");
         }
 
-        String formatTime(int seconds) {
-            if (seconds < 0) seconds = 0;
-            int m = seconds / 60;
-            int s = seconds % 60;
-            return String.format("%02d:%02d", m, s);
+        void applyElo(GameResult result) {
+            if (whiteIsAI || blackIsAI) return;
+            String cat = categoryFor(minutes);
+            if (result == GameResult.DRAW) {
+                EloManager.RatingChange[] ch = plugin.eloManager.applyResult(white.getUniqueId(), black.getUniqueId(), 0.5, cat);
+                sendRatingChange(white, ch[0]);
+                sendRatingChange(black, ch[1]);
+            } else if (result == GameResult.WHITE_WIN) {
+                EloManager.RatingChange[] ch = plugin.eloManager.applyResult(white.getUniqueId(), black.getUniqueId(), 1.0, cat);
+                sendRatingChange(white, ch[0]);
+                sendRatingChange(black, ch[1]);
+            } else if (result == GameResult.BLACK_WIN) {
+                EloManager.RatingChange[] ch = plugin.eloManager.applyResult(black.getUniqueId(), white.getUniqueId(), 1.0, cat);
+                sendRatingChange(black, ch[0]);
+                sendRatingChange(white, ch[1]);
+            }
+        }
+
+        void sendRatingChange(Player p, EloManager.RatingChange c) {
+            if (p == null || !p.isOnline() || c == null) return;
+            String sign = c.delta >= 0 ? "+" : "";
+            p.sendMessage(ChatColor.GRAY + "Rating (" + timeControlName().toLowerCase() + "): " + c.oldRating + " -> " + c.newRating + " (" + sign + c.delta + ")");
+        }
+
+        void onPlayerQuit(Player p) {
+            // Restore the player's pre-game inventory before the server saves their data
+            // on disconnect, so chess pieces never persist after the game.
+            openChests.remove(p.getUniqueId());
+            SavedInventory s = saved.remove(p.getUniqueId());
+            if (s != null) {
+                s.restore(p);
+            }
+            if (!running) return;
+            if (puzzleMode) {
+                endGame("You left the daily puzzle.", GameResult.ABANDONED);
+                return;
+            }
+            if (whiteIsAI || blackIsAI) {
+                // AI game: both slots reuse the human's Player object, so decide the
+                // winner from which side the human is actually playing.
+                boolean humanIsWhite = !whiteIsAI;
+                endGame("AI wins (you disconnected)", humanIsWhite ? GameResult.BLACK_WIN : GameResult.WHITE_WIN);
+                return;
+            }
+            if (p.getUniqueId().equals(white.getUniqueId())) {
+                endGame(sideName(false) + " wins (opponent disconnected)", GameResult.BLACK_WIN);
+            } else {
+                endGame(sideName(true) + " wins (opponent disconnected)", GameResult.WHITE_WIN);
+            }
+        }
+
+        void onClose(Player p) {
+            // closing a puzzle board counts as giving up (prevents orphaned games)
+            if (puzzleMode && running) {
+                giveUpPuzzle(p);
+                return;
+            }
+            // discard any pending promotion if the promoting player leaves the view
+            if (pendingPromotion != null && promotionPlayer != null && promotionPlayer.equals(p.getUniqueId())) {
+                pendingPromotion = null;
+                promotionPlayer = null;
+            }
+            // drop this player's selection when they leave the view
+            if (selectedPlayer != null && selectedPlayer.equals(p.getUniqueId())) {
+                selectedPlayer = null; selectedX = -1; selectedY = -1;
+            }
+            // return any picked-up piece so it never drops on the ground
+            ItemStack cursor = p.getItemOnCursor();
+            if (cursor != null && !cursor.getType().isAir()) {
+                p.setItemOnCursor(null);
+            }
+            // restore player's inventory when they close the board; game continues
+            openChests.remove(p.getUniqueId());
+            SavedInventory s = saved.remove(p.getUniqueId());
+            if (s != null) {
+                s.restore(p);
+                p.sendMessage(ChatColor.GRAY + "Your inventory has been restored. Use /chessboard to reopen your board and continue the match.");
+            }
+        }
+
+        void sendBoth(String s) {
+            if (!whiteIsAI && white.isOnline()) white.sendMessage(s);
+            if (!blackIsAI && black.isOnline()) black.sendMessage(s);
+        }
+
+        String sideName(boolean isWhite) {
+            boolean ai = isWhite ? whiteIsAI : blackIsAI;
+            Player p = isWhite ? white : black;
+            return ai ? "AI" : p.getName();
         }
 
         boolean aiToMove() {
-            if (!running) return false;
-            return board.whiteToMove ? whiteIsAI : blackIsAI;
+            return (board.whiteToMove && whiteIsAI) || (!board.whiteToMove && blackIsAI);
         }
 
         void maybeScheduleAI() {
-            if (!running || puzzleMode || aiThinking) return;
+            if (!running) return;
+            if (puzzleMode) return;
+            if (aiThinking) return;
             if (!aiToMove()) return;
             aiThinking = true;
-            plugin.getServer().getScheduler().runTaskLater(plugin, () -> {
-                aiThinking = false;
-                if (!running || !aiToMove()) return;
-                ChessMove move = new ChessAI().findBestMove(board, lastDoublePawn, aiDifficulty);
-                if (move == null) return;
-                ChessPieceType promo = move.promotion ? (move.promotionTo != null ? move.promotionTo : ChessPieceType.QUEEN) : null;
-                completeMove(move, promo);
-            }, 20L);
+            plugin.getServer().getScheduler().runTaskLater(plugin, this::doAIMove, 5L);
         }
 
-        void sendBoth(String msg) {
-            if (white != null && white.isOnline()) white.sendMessage(msg);
-            if (black != null && black.isOnline() && !black.getUniqueId().equals(white.getUniqueId())) {
-                black.sendMessage(msg);
+        void doAIMove() {
+            if (!running) return;
+            if (puzzleMode) return;
+            if (!aiToMove()) return;
+            // aiThinking stays true until the move is applied, so tick() cannot re-schedule
+            final ChessBoard snapshot = board.copy();
+            final int[] ldp = lastDoublePawn == null ? null : lastDoublePawn.clone();
+            plugin.getServer().getScheduler().runTaskAsynchronously(plugin, () -> {
+                ChessMove best = null;
+                try {
+                    best = new ChessAI().findBestMove(snapshot, ldp, aiDifficulty);
+                } catch (Throwable t) {
+                    plugin.getLogger().warning("Chess AI search failed: " + t);
+                }
+                final ChessMove result = best;
+                plugin.getServer().getScheduler().runTask(plugin, () -> applyAIMove(result));
+            });
+        }
+
+        // Runs on the main thread. Applies the AI's move, or picks a random legal
+        // move as a fallback so the game can never stall waiting for the AI.
+        void applyAIMove(ChessMove best) {
+            try {
+                if (!running || !aiToMove()) return;
+                if (best == null) {
+                    List<ChessMove> legal = new ArrayList<>();
+                    boolean whiteToMove = board.whiteToMove;
+                    for (int x = 0; x < 8; x++) {
+                        for (int y = 0; y < 8; y++) {
+                            ChessPiece pc = board.getPiece(x, y);
+                            if (pc == null || (pc.color == Color.WHITE) != whiteToMove) continue;
+                            legal.addAll(board.legalMoves(x, y, lastDoublePawn));
+                        }
+                    }
+                    if (legal.isEmpty()) {
+                        sendBoth(ChatColor.RED + "AI could not find a move.");
+                        return;
+                    }
+                    best = legal.get(new Random().nextInt(legal.size()));
+                }
+                sendBoth(ChatColor.GRAY + "AI played " + squareName(best.fromX, best.fromY) + "->" + squareName(best.toX, best.toY)
+                        + (best.promotion ? " (promotes to " + (best.promotionTo != null ? best.promotionTo.name() : "queen").toLowerCase() + ")" : "") + ".");
+                completeMove(best, best.promotion ? (best.promotionTo != null ? best.promotionTo : ChessPieceType.QUEEN) : null);
+            } finally {
+                aiThinking = false;
             }
         }
 
+        // Build and open combined view for player
+        void openFor(Player p) {
+            openView(p, viewTitle(), false);
+        }
+
+        // GUI title for the current view (puzzles use their own header)
         String viewTitle() {
+            if (puzzleMode) return ChatColor.LIGHT_PURPLE + "Daily Puzzle #" + (puzzleDay + 1);
             return title;
         }
 
-        private ItemStack createButton(Material mat, String name) {
-            ItemStack it = new ItemStack(mat);
-            ItemMeta meta = it.getItemMeta();
-            meta.setDisplayName(name);
-            it.setItemMeta(meta);
-            return it;
-        }
-
-        String infoText(int guiRow, boolean spectator) {
-            switch (guiRow) {
-                case 0:
-                    return ChatColor.WHITE + "White: " + white.getName()
-                            + (puzzleMode ? "" : " [" + formatTime(whiteTime) + "]");
-                case 1:
-                    return board.whiteToMove
-                            ? ChatColor.WHITE + "White to move"
-                            : ChatColor.DARK_GRAY + "Black to move";
-                case 2:
-                    return ChatColor.DARK_GRAY + "Black: " + black.getName()
-                            + (puzzleMode ? "" : " [" + formatTime(blackTime) + "]");
-                case 3:
-                    return ChatColor.GRAY + timeControlName() + (bet > 0 ? " - Bet: " + bet : "");
-                default:
-                    return "";
-            }
-        }
-
-        // Builds the fixed border/info/action-button area of the top chest.
-        // Board squares (rows 0-3, cols 0-7) are filled separately by renderBoardInto.
-        private void renderControls(Inventory top, Player p, boolean spectator) {
-            ItemStack filler = new ItemStack(Material.GRAY_STAINED_GLASS_PANE);
-            ItemMeta fm = filler.getItemMeta();
-            fm.setDisplayName(" ");
-            filler.setItemMeta(fm);
-            for (int slot = 36; slot < 45; slot++) top.setItem(slot, filler.clone());
-
-            for (int guiRow = 0; guiRow < 4; guiRow++) {
-                int slot = guiRow * 9 + 8;
-                top.setItem(slot, createButton(Material.PAPER, infoText(guiRow, spectator)));
-            }
-
-            List<ItemStack> buttons = new ArrayList<>();
-            if (spectator) {
-                buttons.add(createButton(Material.BOOK, ChatColor.AQUA + "Moves"));
-                buttons.add(createButton(Material.OAK_SIGN, ChatColor.GRAY + "Info"));
-            } else if (puzzleMode) {
-                buttons.add(createButton(Material.COMPASS, ChatColor.AQUA + "Flip"));
-                buttons.add(createButton(Material.GLOWSTONE_DUST, ChatColor.YELLOW + "Hint"));
-                buttons.add(createButton(Material.BARRIER, ChatColor.RED + "Give Up"));
-                buttons.add(createButton(Material.OAK_SIGN, ChatColor.GRAY + "Info"));
-            } else {
-                buttons.add(createButton(Material.COMPASS, ChatColor.AQUA + "Flip"));
-                buttons.add(createButton(Material.CLOCK, ChatColor.AQUA + "Time"));
-                buttons.add(createButton(Material.BOOK, ChatColor.AQUA + "Moves"));
-                buttons.add(createButton(Material.OAK_SIGN, ChatColor.GRAY + "Undo"));
-                if (!whiteIsAI && !blackIsAI) {
-                    if (drawOfferFrom == null) {
-                        buttons.add(createButton(Material.WHITE_BANNER, ChatColor.GRAY + "Offer Draw"));
-                    } else if (!drawOfferFrom.equals(p.getUniqueId())) {
-                        buttons.add(createButton(Material.LIME_WOOL, ChatColor.GREEN + "Accept Draw"));
-                        buttons.add(createButton(Material.RED_WOOL, ChatColor.RED + "Deny Draw"));
-                    }
-                }
-                buttons.add(createButton(Material.RED_DYE, ChatColor.RED + "Resign"));
-                buttons.add(createButton(Material.OAK_SIGN, ChatColor.GRAY + "Info"));
-            }
-            buttons.add(createButton(Material.BARRIER, ChatColor.RED + "Close"));
-
-            int slot = 45;
-            for (ItemStack b : buttons) {
-                if (slot > 53) break;
-                top.setItem(slot, b);
-                slot++;
-            }
-            while (slot <= 53) {
-                top.setItem(slot, filler.clone());
-                slot++;
-            }
-        }
-
-        void openFor(Player p) {
+        // Build and open combined view for a player or spectator (read-only board, own controls)
+        void openView(Player p, String viewTitle, boolean spectator) {
             if (!p.isOnline()) return;
-            SavedInventory existing = saved.get(p.getUniqueId());
-            if (existing == null) existing = SavedInventory.save(p);
-            Inventory top = Bukkit.createInventory(null, 54, viewTitle());
-            p.openInventory(top);
-            // re-assert the saved snapshot in case opening this inventory triggered
-            // an InventoryCloseEvent (onClose) on whatever the player had open before
-            saved.put(p.getUniqueId(), existing);
-            renderBoardInto(top, p, false);
+            // Save current inventory if we haven't already
+            if (!saved.containsKey(p.getUniqueId())) {
+                saved.put(p.getUniqueId(), SavedInventory.save(p));
+            }
+            // Build top inventory (54)
+            Inventory inv = Bukkit.createInventory(null, 54, viewTitle);
+            openChests.put(p.getUniqueId(), inv);
+            // fill top 4 ranks into chest top:
+            // top area: guiRow 0..3, col 0..7 -> boardRow = guiRow, boardCol = col
+            for (int guiRow = 0; guiRow < 4; guiRow++) {
+                for (int guiCol = 0; guiCol < 8; guiCol++) {
+                    int slot = guiRow * 9 + guiCol; // col 8 reserved for controls
+                    ChessPiece piece = board.getPiece(guiRow, guiCol);
+                    inv.setItem(slot, toItemFor(piece));
+                }
+                // control column at col 8
+                int ctrlSlot = guiRow * 9 + 8;
+                inv.setItem(ctrlSlot, createInfo(infoText(guiRow, spectator)));
+            }
+            // bottom chest row: controls
+            renderControls(inv, p, spectator);
+
+            // Apply bottom 4 ranks into player's own visible inventory slots:
+            // bottomRow 0..3 maps to board rows 4..7
+            // PlayerInventory slot mapping:
+            // hotbar: 0..8 (we'll use 0..7)
+            // main rows: 9..17, 18..26, 27..35
+            PlayerInventory pinv = p.getInventory();
+            // prepare a clean copy of the saved inventory contents as base then overwrite the controlled slots
+            // Clear the 32 slots we will write to, then set them
+            // bottomRow 0 -> main row 1 (slots 9..16)
+            // bottomRow 1 -> main row 2 (slots 18..25)
+            // bottomRow 2 -> main row 3 (slots 27..34)
+            // bottomRow 3 -> hotbar (slots 0..7)
+            // For each bottomRow
+            for (int br = 0; br < 4; br++) {
+                int boardRow = 4 + br;
+                for (int col = 0; col < 8; col++) {
+                    ItemStack item = toItemFor(board.getPiece(boardRow, col));
+                    int invIndex;
+                    if (br == 3) { // hotbar
+                        invIndex = col; // 0..7
+                    } else {
+                        invIndex = 9 + br * 9 + col; // br 0 -> 9..16, br1->18..25, br2->27..34 (works since 9 + br*9)
+                        // Note: for br=0 -> 9 + 0 + col = 9..16 ; br=1 -> 18..25 ; br=2 -> 27..34
+                    }
+                    pinv.setItem(invIndex, item);
+                }
+            }
+
+            // Finally open the chest for the player
+            p.openInventory(inv);
         }
+
+        // Spectators ----------------------------------------------------------
 
         void addSpectator(Player p) {
-            if (!running) {
-                p.sendMessage(ChatColor.RED + "This game is not running.");
-                return;
-            }
-            if (p.getUniqueId().equals(white.getUniqueId()) || p.getUniqueId().equals(black.getUniqueId())) {
-                p.sendMessage(ChatColor.RED + "You can't spectate your own game.");
-                return;
-            }
-            SavedInventory existing = saved.get(p.getUniqueId());
-            if (existing == null) existing = SavedInventory.save(p);
-            spectatorTitle = title + " (Spectating)";
-            Inventory top = Bukkit.createInventory(null, 54, spectatorTitle);
-            p.openInventory(top);
-            saved.put(p.getUniqueId(), existing);
+            if (!running) return;
+            if (spectators.containsKey(p.getUniqueId())) return;
+            String base = "Spectating: " + sideName(true) + " vs " + sideName(false);
+            if (base.length() > 30) base = base.substring(0, 30);
+            spectatorTitle = ChatColor.DARK_AQUA + base;
             spectators.put(p.getUniqueId(), p);
             plugin.spectators.put(p.getUniqueId(), this);
-            renderBoardInto(top, p, true);
-            p.sendMessage(ChatColor.GRAY + "Now spectating " + white.getName() + " vs " + black.getName() + ".");
+            openView(p, spectatorTitle, true);
+            p.sendMessage(ChatColor.AQUA + "You are now spectating " + sideName(true) + " vs " + sideName(false)
+                    + (bet > 0 && plugin.getEconomy() != null ? " (bet " + plugin.getEconomy().format(bet) + ")" : "") + ".");
+            p.sendMessage(ChatColor.GRAY + "Close the board to stop spectating.");
         }
 
         void removeSpectator(Player p) {
-            if (spectators.remove(p.getUniqueId()) == null) return;
+            if (!spectators.containsKey(p.getUniqueId()) && !plugin.spectators.containsKey(p.getUniqueId())) return;
+            spectators.remove(p.getUniqueId());
             plugin.spectators.remove(p.getUniqueId());
-            SavedInventory si = saved.remove(p.getUniqueId());
-            if (si != null && p.isOnline()) si.restore(p);
+            openChests.remove(p.getUniqueId());
+            SavedInventory s = saved.remove(p.getUniqueId());
+            if (s != null && p.isOnline()) s.restore(p);
+            p.sendMessage(ChatColor.GRAY + "You are no longer spectating.");
         }
 
         void handleSpectatorClick(Player p, InventoryClickEvent e) {
             int raw = e.getRawSlot();
-            if (raw < 45 || raw > 53) return;
-            ItemStack cur = e.getCurrentItem();
-            if (cur == null || !cur.hasItemMeta()) return;
-            String name = ChatColor.stripColor(cur.getItemMeta().getDisplayName());
-            switch (name) {
-                case "Moves":
-                    sendMoveLog(p);
-                    return;
-                case "Info":
-                    p.sendMessage(ChatColor.GRAY + "You are spectating this game. Close to stop.");
-                    return;
-                case "Close":
-                    p.closeInventory();
-                    return;
-                default:
-                    return;
+            if (raw >= 45 && raw <= 53) {
+                ItemStack cur = e.getCurrentItem();
+                if (cur == null || !cur.hasItemMeta()) return;
+                String name = ChatColor.stripColor(cur.getItemMeta().getDisplayName());
+                switch (name) {
+                    case "Flip":
+                        openView(p, spectatorTitle, true);
+                        return;
+                    case "Info":
+                        p.sendMessage(ChatColor.GRAY + "Spectating " + sideName(true) + " vs " + sideName(false)
+                                + " | " + formatTime(whiteTime) + " - " + formatTime(blackTime)
+                                + (bet > 0 && plugin.getEconomy() != null ? " | Bet: " + plugin.getEconomy().format(bet) : ""));
+                        return;
+                    case "Close":
+                        p.closeInventory();
+                        return;
+                }
             }
+            // all other clicks on the spectator board are ignored (event already cancelled)
         }
 
-        void applyElo(GameResult result) {
-            if (puzzleMode || whiteIsAI || blackIsAI) return;
-            if (white.getUniqueId().equals(black.getUniqueId())) return;
-            double scoreA;
-            if (result == GameResult.WHITE_WIN) scoreA = 1.0;
-            else if (result == GameResult.BLACK_WIN) scoreA = 0.0;
-            else scoreA = 0.5;
-            String cat = categoryFor(minutes);
-            EloManager.RatingChange[] changes = plugin.eloManager.applyResult(white.getUniqueId(), black.getUniqueId(), scoreA, cat);
-            if (changes != null && changes.length == 2) {
-                EloManager.RatingChange wc = changes[0];
-                EloManager.RatingChange bc = changes[1];
-                white.sendMessage(ChatColor.AQUA + "Rating: " + wc.oldRating + " -> " + wc.newRating
-                        + " (" + (wc.delta >= 0 ? "+" : "") + wc.delta + ")");
-                black.sendMessage(ChatColor.AQUA + "Rating: " + bc.oldRating + " -> " + bc.newRating
-                        + " (" + (bc.delta >= 0 ? "+" : "") + bc.delta + ")");
+        private ItemStack createButton(Material mat, String name) {
+            ItemStack it = new ItemStack(mat);
+            ItemMeta m = it.getItemMeta();
+            m.setDisplayName(name);
+            it.setItemMeta(m);
+            return it;
+        }
+
+        private ItemStack createInfo(String text) {
+            ItemStack info = new ItemStack(Material.PAPER);
+            ItemMeta meta = info.getItemMeta();
+            meta.setDisplayName(text);
+            info.setItemMeta(meta);
+            return info;
+        }
+
+        private void renderControls(Inventory top, Player p, boolean spectator) {
+            top.setItem(45, createButton(Material.ARROW, ChatColor.GREEN + "Flip"));
+            if (spectator) {
+                top.setItem(51, createButton(Material.PAPER, ChatColor.AQUA + "Info"));
+                top.setItem(53, createButton(Material.OAK_SIGN, ChatColor.GRAY + "Close"));
+                return;
             }
+            if (puzzleMode) {
+                top.setItem(46, createButton(Material.BARRIER, ChatColor.RED + "Give Up"));
+                top.setItem(47, createButton(Material.CLOCK, ChatColor.GOLD + "Hint"));
+                top.setItem(51, createButton(Material.PAPER, ChatColor.AQUA + "Info"));
+                top.setItem(53, createButton(Material.OAK_SIGN, ChatColor.GRAY + "Close"));
+                return;
+            }
+            top.setItem(46, createButton(Material.BARRIER, ChatColor.RED + "Resign"));
+            top.setItem(47, createButton(Material.CLOCK, ChatColor.GOLD + "Time"));
+            boolean pendingToMe = drawOfferFrom != null && !drawOfferFrom.equals(p.getUniqueId());
+            if (pendingToMe) {
+                top.setItem(48, createButton(Material.WRITABLE_BOOK, ChatColor.GREEN + "Accept Draw"));
+                top.setItem(49, createButton(Material.BARRIER, ChatColor.GRAY + "Deny Draw"));
+            } else {
+                top.setItem(48, createButton(Material.WRITABLE_BOOK, ChatColor.YELLOW + "Offer Draw"));
+            }
+            if (whiteIsAI || blackIsAI) {
+                top.setItem(50, createButton(Material.ARROW, ChatColor.AQUA + "Undo"));
+            }
+            top.setItem(51, createButton(Material.PAPER, ChatColor.AQUA + "Info"));
+            top.setItem(52, createButton(Material.BOOK, ChatColor.GOLD + "Moves"));
+            top.setItem(53, createButton(Material.OAK_SIGN, ChatColor.GRAY + "Close"));
         }
 
-        void giveWinReward(GameResult result) {
-            if (puzzleMode) return;
-            if (result != GameResult.WHITE_WIN && result != GameResult.BLACK_WIN) return;
-            Economy econ = plugin.getEconomy();
-            if (econ == null) return;
-            double amount = plugin.getConfig().getDouble("rewards.win-amount", 0);
-            if (amount <= 0) return;
-            Player winner = result == GameResult.WHITE_WIN ? white : black;
-            if (winner == null || !winner.isOnline()) return;
-            econ.depositPlayer(Bukkit.getOfflinePlayer(winner.getUniqueId()), amount);
-            winner.sendMessage(ChatColor.GREEN + "You earned " + econ.format(amount) + " for winning!");
+        private String infoText(int guiRow, boolean spectator) {
+            if (puzzleMode) {
+                if (guiRow == 0) return ChatColor.LIGHT_PURPLE + "Daily Puzzle #" + (puzzleDay + 1);
+                if (guiRow == 1) return ChatColor.AQUA + puzzleTitle;
+                if (guiRow == 2) return ChatColor.YELLOW + "Turn: " + (board.whiteToMove ? "White" : "Black");
+                return ChatColor.GRAY + "Mate in " + puzzleMateIn + " | Tries: " + puzzleAttempts;
+            }
+            if (guiRow == 0) return ChatColor.AQUA + "White: " + (spectator ? sideName(true) : formatTime(whiteTime));
+            if (guiRow == 1) return ChatColor.AQUA + "Black: " + (spectator ? sideName(false) : formatTime(blackTime));
+            if (guiRow == 2) return ChatColor.YELLOW + "Turn: " + (board.whiteToMove ? "White" : "Black");
+            return spectator ? ChatColor.GRAY + "Spectating" : ChatColor.GRAY + "" + minutes + "m " + timeControlName();
         }
 
+        private String formatTime(int secs) {
+            int m = secs / 60;
+            int s = secs % 60;
+            return String.format("%d:%02d", m, s);
+        }
+
+        private ItemStack toItemFor(ChessPiece p) {
+            return toItemFor(p, false);
+        }
 
         private ItemStack toItemFor(ChessPiece p, boolean glow) {
             if (p == null) return new ItemStack(Material.GRAY_STAINED_GLASS_PANE);
@@ -1922,7 +2033,7 @@ public class ChessPlugin extends JavaPlugin implements Listener {
             switch (p.type) {
                 case PAWN: return p.color == Color.WHITE ? Material.OAK_FENCE : Material.DARK_OAK_FENCE;
                 case ROOK: return p.color == Color.WHITE ? Material.IRON_BLOCK : Material.BLACKSTONE;
-                case KNIGHT: return p.color == Color.WHITE ? Material.SADDLE : Material.LEATHER_HORSE_ARMOR;
+                case KNIGHT: return p.color == Color.WHITE ? Material.IRON_HORSE_ARMOR : Material.LEATHER_HORSE_ARMOR;
                 case BISHOP: return p.color == Color.WHITE ? Material.BRICK : Material.NETHER_BRICKS;
                 case QUEEN: return p.color == Color.WHITE ? Material.GOLD_BLOCK : Material.CRYING_OBSIDIAN;
                 case KING: return p.color == Color.WHITE ? Material.DIAMOND_BLOCK : Material.OBSIDIAN;
@@ -1930,20 +2041,13 @@ public class ChessPlugin extends JavaPlugin implements Listener {
             }
         }
 
-        void onClose(Player p) {
-            if (!running) return;
-            SavedInventory si = saved.remove(p.getUniqueId());
-            if (si != null) si.restore(p);
-        }
-
-        void onPlayerQuit(Player p) {
-            if (!running) return;
-            endGame(p.getName() + " disconnected.", GameResult.ABANDONED);
-        }
-
         // Handle clicks in combined view
         void onInventoryClick(Player p, InventoryClickEvent e) {
+            // Cancel the click first so a board interaction can never pick up /
+            // move items even when the game has just ended.
+            e.setCancelled(true);
             if (!running) return;
+            // All clicks are cancelled unless this is a legal pick-up of a piece (drag start).
             // while a promotion is pending for this player, all their clicks go to the promotion picker
             if (pendingPromotion != null && promotionPlayer != null && promotionPlayer.equals(p.getUniqueId())) {
                 handlePromotionClick(p, e);
@@ -1959,7 +2063,6 @@ public class ChessPlugin extends JavaPlugin implements Listener {
                 if (c == 8 && r >= 0 && r < 4) {
                     ItemStack current = e.getCurrentItem();
                     if (current == null || !current.hasItemMeta()) return;
-                    String name = ChatColor.stripColor(current.getItemMeta().getDisplayName());
                     // nothing special for these info slots
                     return;
                 }
@@ -2011,57 +2114,140 @@ public class ChessPlugin extends JavaPlugin implements Listener {
                             sendMoveLog(p);
                             return;
                         case "Info":
-                            p.sendMessage(ChatColor.GRAY + "8x8 combined board. Close to restore inventory.");
+                            p.sendMessage(ChatColor.GRAY + "8x8 combined board. Drag pieces to move, or click a piece then click the destination.");
                             return;
                         case "Close":
                             p.closeInventory();
                             return;
                     }
-                }
-                // chest board region: rows 0..3, cols 0..7
-                int guiRow = raw / 9;
-                int guiCol = raw % 9;
-                if (guiRow >= 0 && guiRow < 4 && guiCol >= 0 && guiCol < 8) {
-                    int boardRow = guiRow;
-                    int boardCol = guiCol;
-                    handleBoardClick(p, boardRow, boardCol);
-                    return;
-                } else {
-                    // clicking non-board chest slot -> ignore (cancelled already)
                     return;
                 }
-            } else {
-                // player inventory region: rawSlot >= 54 maps to player inventory slots 0..35
-                // This must mirror the layout used in openFor():
-                //   hotbar slots 0..7            -> board row 7
-                //   main row 1 slots 9..16       -> board row 4
-                //   main row 2 slots 18..25      -> board row 5
-                //   main row 3 slots 27..34      -> board row 6
-                int invIndex = raw - 54;
-                int brow, bcol;
-                if (invIndex >= 0 && invIndex <= 7) {
-                    brow = 3;
-                    bcol = invIndex;
-                } else if (invIndex >= 9 && invIndex <= 34) {
-                    int t = invIndex - 9;
-                    brow = t / 9;
-                    bcol = t % 9;
-                } else {
-                    // slot 8, 17, 26, 35 and anything beyond are not part of the board area
-                    return;
+            }
+            // Map any raw slot to a board square (both chest and player-inventory regions)
+            int[] sq = boardSquareForRaw(raw);
+            if (sq == null) {
+                // non-board slot: if the player is holding a picked-up piece, return it to the board
+                ItemStack cursor = p.getItemOnCursor();
+                if (cursor != null && !cursor.getType().isAir() && isPieceItem(cursor)) {
+                    p.setItemOnCursor(null);
+                    refreshPlayer(p);
                 }
-                if (brow < 0 || brow > 3 || bcol < 0 || bcol > 7) return;
-                int boardRow = 4 + brow;
-                int boardCol = bcol;
-                handleBoardClick(p, boardRow, boardCol);
                 return;
+            }
+            handleBoardClick(p, sq[0], sq[1], e);
+        }
+
+        // Map an InventoryClickEvent raw slot to board coordinates, or null if it is not a board
+        // square. Mirrors the layout in openView(): chest rows 0-3 -> board rows 0-3; the player's
+        // visible inventory slots (hotbar 0-7, main rows 1-3) map to board rows 4-7.
+        private int[] boardSquareForRaw(int raw) {
+            if (raw < 54) {
+                int r = raw / 9;
+                int c = raw % 9;
+                if (r >= 0 && r < 4 && c >= 0 && c < 8) {
+                    return new int[]{r, c};
+                }
+                return null;
+            }
+            int invIndex = raw - 54;
+            int brow, bcol;
+            if (invIndex >= 0 && invIndex <= 7) {
+                brow = 3;
+                bcol = invIndex;
+            } else if (invIndex >= 9 && invIndex <= 34) {
+                int t = invIndex - 9;
+                brow = t / 9;
+                bcol = t % 9;
+            } else {
+                return null;
+            }
+            if (brow < 0 || brow > 3 || bcol < 0 || bcol > 7) return null;
+            return new int[]{4 + brow, bcol};
+        }
+
+        private boolean isPieceItem(ItemStack it) {
+            if (it == null || it.getType().isAir() || !it.hasItemMeta()) return false;
+            return it.getItemMeta().getPersistentDataContainer().has(ChessPlugin.PIECE_KEY, PersistentDataType.STRING);
+        }
+
+        // Handle a drag-and-drop: the player picked up a piece and released it on a square.
+        private void completeDrop(Player p, int toRow, int toCol) {
+            if (!running) return;
+            if (aiToMove()) {
+                p.sendMessage(ChatColor.RED + "The AI is thinking...");
+                return;
+            }
+            p.setItemOnCursor(null);
+            if (selectedPlayer == null || !selectedPlayer.equals(p.getUniqueId()) || selectedX < 0 || selectedY < 0) {
+                // stale or foreign selection: drop it so it can't block anyone
+                selectedPlayer = null; selectedX = -1; selectedY = -1;
+                p.sendMessage(ChatColor.RED + "Pick up the piece you want to move first.");
+                refreshPlayer(p);
+                return;
+            }
+            int fromX = selectedX, fromY = selectedY;
+            List<ChessMove> legal = board.legalMoves(fromX, fromY, lastDoublePawn);
+            Optional<ChessMove> chosen = legal.stream().filter(m -> m.toX == toRow && m.toY == toCol).findFirst();
+            if (chosen.isEmpty()) {
+                ChessPiece cc = board.getPiece(toRow, toCol);
+                ChessPiece fromPiece = board.getPiece(fromX, fromY);
+                if (cc != null && fromPiece != null && cc.color == fromPiece.color) {
+                    selectedX = toRow; selectedY = toCol;
+                    p.sendMessage(ChatColor.YELLOW + "Selected " + cc.type.name() + " at " + squareName(toRow, toCol) + ". Click the destination square to move.");
+                    refreshPlayer(p);
+                    return;
+                }
+                p.sendMessage(ChatColor.RED + "Illegal move.");
+                selectedPlayer = null; selectedX = -1; selectedY = -1;
+                refreshPlayer(p);
+                return;
+            }
+            ChessMove move = chosen.get();
+            if (move.promotion) {
+                // pause: ask the player which piece to promote to
+                selectedPlayer = null; selectedX = -1; selectedY = -1;
+                pendingPromotion = move;
+                promotionPlayer = p.getUniqueId();
+                showPromotionChoices(p);
+                return;
+            }
+            if (puzzleMode) {
+                handlePuzzleMove(p, move, null);
+                return;
+            }
+            completeMove(move, null);
+        }
+
+        // Drag gesture (holding the mouse and releasing over a square): treat a single-square
+        // release as a drag-and-drop move. Multi-slot drags are simply cancelled.
+        void onDrag(Player p, InventoryDragEvent e) {
+            e.setCancelled(true);
+            if (!running) return;
+            if (pendingPromotion != null && promotionPlayer != null && promotionPlayer.equals(p.getUniqueId())) return;
+            ItemStack cursor = p.getItemOnCursor();
+            if (cursor == null || cursor.getType().isAir() || !isPieceItem(cursor)) return;
+            Set<Integer> slots = e.getRawSlots();
+            if (slots.size() == 1) {
+                int raw = slots.iterator().next();
+                int[] sq = boardSquareForRaw(raw);
+                if (sq != null) {
+                    completeDrop(p, sq[0], sq[1]);
+                }
             }
         }
 
-        private void handleBoardClick(Player player, int br, int bc) {
+        private void handleBoardClick(Player player, int br, int bc, InventoryClickEvent e) {
             if (!running) return;
             if (aiToMove()) {
                 player.sendMessage(ChatColor.RED + "The AI is thinking...");
+                return;
+            }
+            ItemStack cursor = player.getItemOnCursor();
+            boolean holdingPiece = cursor != null && !cursor.getType().isAir() && isPieceItem(cursor);
+            if (holdingPiece) {
+                // Drag-and-drop: this square is the drop target; the click stays cancelled so the
+                // held piece is never placed for real.
+                completeDrop(player, br, bc);
                 return;
             }
             ChessPiece clicked = board.getPiece(br, bc);
@@ -2088,47 +2274,15 @@ public class ChessPlugin extends JavaPlugin implements Listener {
                         return;
                     }
                 }
+                // Allow this click to pick the piece up onto the cursor (drag support).
+                e.setCancelled(false);
                 selectedPlayer = player.getUniqueId();
                 selectedX = br; selectedY = bc;
-                player.sendMessage(ChatColor.YELLOW + "Selected " + clicked.type.name() + " at " + squareName(br, bc));
+                player.sendMessage(ChatColor.YELLOW + "Selected " + clicked.type.name() + " at " + squareName(br, bc) + ". Now click the destination square to move.");
                 refreshPlayer(player);
             } else {
-                if (!selectedPlayer.equals(player.getUniqueId())) {
-                    player.sendMessage(ChatColor.RED + "Another player is mid-selection.");
-                    return;
-                }
-                int fromX = selectedX, fromY = selectedY;
-                int toX = br, toY = bc;
-                List<ChessMove> legal = board.legalMoves(fromX, fromY, lastDoublePawn);
-                Optional<ChessMove> chosen = legal.stream().filter(m -> m.toX == toX && m.toY == toY).findFirst();
-                if (chosen.isEmpty()) {
-                    ChessPiece cc = board.getPiece(br, bc);
-                    ChessPiece fromPiece = board.getPiece(fromX, fromY);
-                    if (cc != null && fromPiece != null && cc.color == fromPiece.color) {
-                        selectedX = br; selectedY = bc;
-                        player.sendMessage(ChatColor.YELLOW + "Reselected " + cc.type.name() + " at " + squareName(br, bc));
-                        refreshPlayer(player);
-                        return;
-                    }
-                    player.sendMessage(ChatColor.RED + "Illegal move.");
-                    selectedPlayer = null; selectedX = -1; selectedY = -1;
-                    refreshPlayer(player);
-                    return;
-                }
-                ChessMove move = chosen.get();
-                if (move.promotion) {
-                    // pause: ask the player which piece to promote to
-                    selectedPlayer = null; selectedX = -1; selectedY = -1;
-                    pendingPromotion = move;
-                    promotionPlayer = player.getUniqueId();
-                    showPromotionChoices(player);
-                    return;
-                }
-                if (puzzleMode) {
-                    handlePuzzleMove(player, move, null);
-                    return;
-                }
-                completeMove(move, null);
+                // click-to-move (or the pick-up was already performed via a prior click)
+                completeDrop(player, br, bc);
             }
         }
 
@@ -2153,10 +2307,10 @@ public class ChessPlugin extends JavaPlugin implements Listener {
             Inventory top = view.getTopInventory();
             if (top == null) return;
             Color c = pendingPromotion.promotionColor;
-            top.setItem(0, toItemFor(new ChessPiece(c, ChessPieceType.QUEEN, 0, 0), false));
-            top.setItem(1, toItemFor(new ChessPiece(c, ChessPieceType.ROOK, 0, 0), false));
-            top.setItem(2, toItemFor(new ChessPiece(c, ChessPieceType.BISHOP, 0, 0), false));
-            top.setItem(3, toItemFor(new ChessPiece(c, ChessPieceType.KNIGHT, 0, 0), false));
+            top.setItem(0, toItemFor(new ChessPiece(c, ChessPieceType.QUEEN, 0, 0)));
+            top.setItem(1, toItemFor(new ChessPiece(c, ChessPieceType.ROOK, 0, 0)));
+            top.setItem(2, toItemFor(new ChessPiece(c, ChessPieceType.BISHOP, 0, 0)));
+            top.setItem(3, toItemFor(new ChessPiece(c, ChessPieceType.KNIGHT, 0, 0)));
             top.setItem(4, createButton(Material.BARRIER, ChatColor.RED + "Cancel"));
             p.sendMessage(ChatColor.YELLOW + "Promote your pawn! Click Queen, Rook, Bishop, or Knight in the top-left of the board.");
         }
@@ -2249,10 +2403,10 @@ public class ChessPlugin extends JavaPlugin implements Listener {
                     + (alreadySolved ? "" : " | Total solved: " + sm.solvedTotal(p.getUniqueId())));
             int bonusDays = plugin.getConfig().getInt("puzzle.streak-bonus-days", 7);
             if (!alreadySolved && sm.streak(p.getUniqueId()) > 0 && sm.streak(p.getUniqueId()) % bonusDays == 0) {
-                Economy econ = plugin.getEconomy();
+                BalanceService econ = plugin.getEconomy();
                 if (econ != null) {
                     double bonus = plugin.getConfig().getDouble("puzzle.streak-bonus", 50.0);
-                    econ.depositPlayer(Bukkit.getOfflinePlayer(p.getUniqueId()), bonus);
+                    econ.deposit(Bukkit.getOfflinePlayer(p.getUniqueId()), bonus);
                     p.sendMessage(ChatColor.GOLD + "Streak bonus: " + econ.format(bonus) + " for a " + sm.streak(p.getUniqueId()) + "-day streak!");
                 }
             }
@@ -2327,7 +2481,7 @@ public class ChessPlugin extends JavaPlugin implements Listener {
                 if (gambitMultiplier < maxMul) {
                     double mult = plugin.getConfig().getDouble("gambit.double-multiplier", 2.0);
                     gambitMultiplier = Math.min(maxMul, gambitMultiplier * mult);
-                    Economy econ = plugin.getEconomy();
+                    BalanceService econ = plugin.getEconomy();
                     sendBoth(ChatColor.DARK_RED + "Check! Gambit bet doubled: "
                             + (econ != null ? econ.format(bet * gambitMultiplier) : String.valueOf(bet * gambitMultiplier))
                             + " each on the line.");
@@ -2628,24 +2782,22 @@ public class ChessPlugin extends JavaPlugin implements Listener {
             if (p == null || !p.isOnline()) return;
             // while this player is choosing a promotion piece, keep the picker visible
             if (pendingPromotion != null && promotionPlayer != null && promotionPlayer.equals(p.getUniqueId())) return;
+            Inventory expected = openChests.get(p.getUniqueId());
+            if (expected == null) return;
             InventoryView iv = p.getOpenInventory();
             if (iv == null) return;
-            Inventory top = iv.getTopInventory();
-            if (top == null) return;
-            if (iv.getTitle().equals(viewTitle())) {
-                renderBoardInto(top, p, false);
-            }
+            if (iv.getTopInventory() != expected) return;
+            renderBoardInto(expected, p, false);
         }
 
         private void refreshSpectator(Player p) {
             if (p == null || !p.isOnline()) return;
+            Inventory expected = openChests.get(p.getUniqueId());
+            if (expected == null) return;
             InventoryView iv = p.getOpenInventory();
             if (iv == null) return;
-            Inventory top = iv.getTopInventory();
-            if (top == null) return;
-            if (spectatorTitle != null && iv.getTitle().equals(spectatorTitle)) {
-                renderBoardInto(top, p, true);
-            }
+            if (iv.getTopInventory() != expected) return;
+            renderBoardInto(expected, p, true);
         }
 
         // Re-apply the board to the top chest and the player's mapped inventory slots
@@ -2872,9 +3024,14 @@ public class ChessPlugin extends JavaPlugin implements Listener {
                         return false;
                     }
                 }
-                q.add(new QueueEntry(p.getUniqueId()));
-                return true;
             }
+            // a player can only sit in one queue at a time: leave every other
+            // category before joining this one
+            remove(p.getUniqueId());
+            synchronized (q) {
+                q.add(new QueueEntry(p.getUniqueId()));
+            }
+            return true;
         }
 
         void remove(UUID id) {
@@ -2998,8 +3155,9 @@ public class ChessPlugin extends JavaPlugin implements Listener {
                 Player b = Bukkit.getPlayer(m.black);
                 boolean wOff = w == null || !w.isOnline();
                 boolean bOff = b == null || !b.isOnline();
-                if (!bOff && wOff) winner = m.white;
-                else winner = m.black;
+                // the player who stayed online advances; if both are offline prefer white
+                // (matches the offline check done in startMatch)
+                winner = bOff ? m.white : m.black;
             }
             if (winner == null && m.attempts < 1) {
                 // draw -> one automatic rematch
@@ -3183,8 +3341,6 @@ public class ChessPlugin extends JavaPlugin implements Listener {
 
         ChessMove findBestMove(ChessBoard b, int[] lastDoublePawn, Difficulty d) {
             int depth = d.depth;
-            nodeLimit = d.nodeLimit;
-            nodes = 0;
             List<ChessMove> moves = allLegalMoves(b, lastDoublePawn);
             if (moves.isEmpty()) return null;
             if (d.randomness > 0 && RANDOM.nextDouble() < d.randomness) {
@@ -3192,12 +3348,17 @@ public class ChessPlugin extends JavaPlugin implements Listener {
                 return moves.get(RANDOM.nextInt(moves.size()));
             }
             orderMoves(moves, b);
+            // Give every root move a fair share of the node budget so later moves
+            // are not searched at depth 0 while the first move consumes the whole limit.
+            long perMoveBudget = Math.max(2_000L, d.nodeLimit / Math.max(1, moves.size()));
             int bestScore = -INF;
             List<ChessMove> best = new ArrayList<>();
             for (ChessMove m : moves) {
                 ChessBoard copy = b.copy();
                 applyMove(copy, m);
                 int[] nextLdp = m.isDoublePawn ? new int[]{m.toX, m.toY} : null;
+                nodes = 0;
+                nodeLimit = perMoveBudget;
                 int score = -alphabeta(copy, depth - 1, -INF, INF, 1, nextLdp);
                 if (d.noise > 0) score += RANDOM.nextInt(2 * d.noise + 1) - d.noise;
                 if (score > bestScore) {
@@ -3351,7 +3512,7 @@ public class ChessPlugin extends JavaPlugin implements Listener {
         void resetInitialPosition() {
             for (int x=0;x<8;x++) for (int y=0;y<8;y++) b[x][y]=null;
             for (int y=0;y<8;y++) setPiece(1,y,new ChessPiece(Color.WHITE, ChessPieceType.PAWN,1,y));
-            for (int y=0;y<8;y++) setPiece(6,y,new ChessPiece(Color.BLACK,ChessPieceType.PAWN,6,y));
+            for (int y=0;y<8;y++) setPiece(6,y,new ChessPiece(Color.BLACK, ChessPieceType.PAWN,6,y));
             setPiece(0,0,new ChessPiece(Color.WHITE,ChessPieceType.ROOK,0,0));
             setPiece(0,7,new ChessPiece(Color.WHITE,ChessPieceType.ROOK,0,7));
             setPiece(7,0,new ChessPiece(Color.BLACK,ChessPieceType.ROOK,7,0));
