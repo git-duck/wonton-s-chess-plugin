@@ -1,5 +1,9 @@
 # Chess plugin configuration
 
+# Set to false to disable all currency betting (/chess <player> <time> <bet>).
+betting:
+  enabled: true
+
 win-reward:
   enabled: true
   amount: 100.0
@@ -16,21 +20,19 @@ gambit:
 titles:
   - threshold: 800
     name: "Novice"
+  - threshold: 1000
+    name: "Amateur"
   - threshold: 1200
-    name: "Intermediate"
-  - threshold: 1600
-    name: "Advanced"
-  - threshold: 1800
+    name: "Club Player"
+  - threshold: 1400
     name: "Expert"
-  - threshold: 2000
-    name: "National Master"
-  - threshold: 2200
+  - threshold: 1600
     name: "Candidate Master"
-  - threshold: 2300
-    name: "FIDE Master"
-  - threshold: 2400
+  - threshold: 1800
+    name: "Master"
+  - threshold: 2000
     name: "International Master"
-  - threshold: 2500
+  - threshold: 2400
     name: "Grandmaster"
 
 matchmaking:
