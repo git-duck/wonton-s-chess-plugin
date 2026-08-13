@@ -1,0 +1,56 @@
+name: Bug Report
+description: Report a bug or glitch in ChessPlugin
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug. Please fill out as much of the following as you can.
+  - type: input
+    id: version
+    attributes:
+      label: Plugin version
+      description: Which version of ChessPlugin are you using? (check /version or the jar name)
+      placeholder: "1.0.0"
+    validations:
+      required: true
+  - type: input
+    id: server
+    attributes:
+      label: Server type and version
+      description: Which server software and version are you running? (e.g. Paper 1.21)
+      placeholder: "Paper 1.21"
+    validations:
+      required: true
+  - type: input
+    id: java
+    attributes:
+      label: Java version
+      description: Java version running the server
+      placeholder: "Java 21"
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: Describe the bug and what you expected to happen instead.
+      placeholder: "When I ... the board ..."
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: How can we reproduce this issue?
+      placeholder: |
+        1. Run /chess <player>
+        2. ...
+        3. ...
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant console/error output
+      description: Paste any stack traces or server logs (a few lines is fine).
+      render: shell

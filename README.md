@@ -1,5 +1,9 @@
 # ChessPlugin
 
+[![Build](https://github.com/git-duck/wonton-s-chess-plugin/actions/workflows/main.yml/badge.svg)](https://github.com/git-duck/wonton-s-chess-plugin/actions/workflows/main.yml)
+[![Release](https://img.shields.io/github/v/release/git-duck/wonton-s-chess-plugin)](https://github.com/git-duck/wonton-s-chess-plugin/releases)
+[![Downloads](https://img.shields.io/github/downloads/git-duck/wonton-s-chess-plugin/total)](https://github.com/git-duck/wonton-s-chess-plugin/releases)
+
 A fully interactive 8x8 Chess engine built natively for Minecraft servers (Paper/Spigot/Bukkit). Instead of using external maps or blocks, games are played entirely inside a custom, split-screen User Interface combining a virtual chest with the player's own inventory.
 
 Current state is debugging some glitches we found.
@@ -58,17 +62,17 @@ permissions:
 ## Developer Installation
 
 ### Prerequisites
-* Java 17 or higher
+* Java 21 or higher
 * Spigot/Paper API (Targeting 1.20+)
 * Maven / Gradle
 
 ### Setup Instructions
 1. Clone your project code directly into your development workspace:
    ```bash
-   git clone https://github.com/ChessPlugin.git
+   git clone https://github.com/git-duck/wonton-s-chess-plugin.git
    ```
 2. Build the output file using your preferred build automation tool:
    ```bash
    mvn clean package
    ```
-3. Drop the compiled `chessplugin-1.0.jar` target directly into your test environment's `plugins/` directory.
+3. Drop the compiled `chessplugin-1.0.0.jar` target directly into your test environment's `plugins/` directory.
