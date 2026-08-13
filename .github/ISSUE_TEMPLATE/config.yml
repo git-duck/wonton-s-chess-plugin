@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: ChessPlugin repository
+    url: https://github.com/git-duck/wonton-s-chess-plugin
+    about: Questions, usage help, and general discussion about the plugin.
