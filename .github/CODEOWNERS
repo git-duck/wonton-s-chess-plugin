@@ -1,0 +1,9 @@
+# Default owners
+* @git-duck
+
+# Source code
+src/ @git-duck
+
+# CI and tooling
+.github/ @git-duck
+pom.xml @git-duck
