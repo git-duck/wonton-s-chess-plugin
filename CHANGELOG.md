@@ -4,6 +4,17 @@ All notable changes to ChessPlugin are documented here. This project follows [Se
 
 ## [Unreleased]
 
+### Added
+- PR template, security policy, CODEOWNERS, and contributing guide
+- `.editorconfig` and expanded `.gitignore`
+
+### Changed
+- `.gitattributes` normalizes line endings; `.gitattributes`/`.editorconfig` enforce LF
+- Plugin metadata (description, authors, website) added and `api-version` bumped to 1.21
+- Reproducible Maven builds via `project.build.outputTimestamp`
+- CI workflow hardened with concurrency groups and read-only permissions
+- Fixed malformed command table in the README
+
 ## [1.0.0] - 2026-08-13
 
 First tagged release. Builds the current `main` as `chessplugin-1.0.0.jar`.
