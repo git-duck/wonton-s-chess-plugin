@@ -30,7 +30,7 @@ Current state is debugging some glitches we found.
 Players require the `chess.use` permission node to access all primary game commands.
 
 | Command | Description | Usage |
-
+| --- | --- | --- |
 | `/chess <player>` | Challenges an active online user to a blitz match. | `/chess PlayerName` |
 | `/chessaccept` | Accepts a pending invitation and starts the UI board. | `/chessaccept` |
 | `/chessdeny` | Rejects a pending invitation and alerts the challenger. | `/chessdeny` |
