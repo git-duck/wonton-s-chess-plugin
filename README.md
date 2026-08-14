@@ -6,7 +6,7 @@
 
 A fully interactive 8x8 Chess engine built natively for Minecraft servers (Paper/Spigot/Bukkit). Instead of using external maps or blocks, games are played entirely inside a custom, split-screen User Interface combining a virtual chest with the player's own inventory.
 
-Current state is debugging some glitches we found.
+Current state: actively maintained with recent gameplay, AI, and tooling improvements. Bugs and feature requests are welcome via the issue templates.
 ## Authors & Credits
 
 * **[wonton_stew](https://github.com/git-duck)** — *Original Creator*
