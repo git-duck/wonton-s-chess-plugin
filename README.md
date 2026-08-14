@@ -1,6 +1,6 @@
 # ChessPlugin
 
-[![Build](https://github.com/git-duck/wonton-s-chess-plugin/actions/workflows/main.yml/badge.svg)](https://github.com/git-duck/wonton-s-chess-plugin/actions/workflows/main.yml)
+[![Build](https://img.shields.io/github/actions/workflow/status/git-duck/wonton-s-chess-plugin/main.yml)](https://github.com/git-duck/wonton-s-chess-plugin/actions/workflows/main.yml)
 [![Release](https://img.shields.io/github/v/release/git-duck/wonton-s-chess-plugin)](https://github.com/git-duck/wonton-s-chess-plugin/releases)
 [![Downloads](https://img.shields.io/github/downloads/git-duck/wonton-s-chess-plugin/total)](https://github.com/git-duck/wonton-s-chess-plugin/releases)
 
