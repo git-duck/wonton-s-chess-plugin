@@ -1,1 +1,25 @@
 target/
+
+# Maven
+*.class
+*.jar.pack
+*.jar.bak
+dependencies/
+
+# IDE
+.idea/
+*.iml
+.vscode/
+.settings/
+.project
+.classpath
+*.ipr
+*.iws
+
+# Logs
+*.log
+logs/
+
+# OS
+.DS_Store
+Thumbs.db
