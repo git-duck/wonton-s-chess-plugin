@@ -19,6 +19,10 @@ commands:
     description: Deny a chess challenge
     usage: /chessdeny
     permission: chess.use
+  chessrematch:
+    description: "Challenge the last person you played to a rematch: /chessrematch [1|3|5|10[+inc]] [bet] [gambit]"
+    usage: /chessrematch [1|3|5|10[+inc]] [bet] [gambit]
+    permission: chess.use
   chessrating:
     description: Show a player's chess ratings
     usage: /chessrating [player]
