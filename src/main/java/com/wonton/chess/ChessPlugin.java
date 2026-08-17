@@ -61,6 +61,8 @@ public class ChessPlugin extends JavaPlugin implements Listener {
     private final Map<UUID, ChessGame> activeGames = new ConcurrentHashMap<>();
     // spectators: player UUID -> game they are watching
     private final Map<UUID, ChessGame> spectators = new ConcurrentHashMap<>();
+    // most recent real (non-AI, non-puzzle) opponent for each player, for /chessrematch
+    private final Map<UUID, UUID> lastOpponent = new ConcurrentHashMap<>();
     // matchmaking queue, replay archive, and tournament manager
     private MatchmakingManager matchmaking;
     private ReplayManager replayManager;
@@ -80,6 +82,7 @@ public class ChessPlugin extends JavaPlugin implements Listener {
         getServer().getPluginManager().registerEvents(this, this);
         Objects.requireNonNull(this.getCommand("chess")).setExecutor(new ChessCommand());
         Objects.requireNonNull(this.getCommand("chessaccept")).setExecutor(new ChessAcceptCommand());
+        Objects.requireNonNull(this.getCommand("chessrematch")).setExecutor(new ChessRematchCommand());
         Objects.requireNonNull(this.getCommand("chessdeny")).setExecutor(new ChessDenyCommand());
         Objects.requireNonNull(this.getCommand("chessrating")).setExecutor(new ChessRatingCommand());
         Objects.requireNonNull(this.getCommand("chessai")).setExecutor(new ChessAiCommand());
@@ -218,25 +221,7 @@ public class ChessPlugin extends JavaPlugin implements Listener {
                 p.sendMessage(ChatColor.RED + "Player not found or offline.");
                 return true;
             }
-            if (target.getUniqueId().equals(p.getUniqueId())) {
-                p.sendMessage(ChatColor.RED + "You cannot challenge yourself.");
-                return true;
-            }
-            if (activeGames.containsKey(p.getUniqueId()) || activeGames.containsKey(target.getUniqueId())) {
-                p.sendMessage(ChatColor.RED + "Either you or the target is already in a game.");
-                return true;
-            }
-            challengeManager.createChallenge(p, target, minutes, bet, increment, gambit);
-            String tc = minutes + (increment > 0 ? "+" + increment : "");
-            if (bet > 0) {
-                p.sendMessage(ChatColor.GREEN + "Challenge sent to " + target.getName() + " (" + tc + "m, bet " + economy.format(bet) + (gambit ? ", gambit" : "") + "). Expires in 30s.");
-                target.sendMessage(ChatColor.YELLOW + p.getName() + " has challenged you to a " + tc + "m chess game for " + ChatColor.GOLD + economy.format(bet)
-                        + (gambit ? ChatColor.LIGHT_PURPLE + " with gambit mode" : "")
-                        + ChatColor.YELLOW + "! Type " + ChatColor.AQUA + "/chessaccept " + ChatColor.YELLOW + "to accept or " + ChatColor.RED + "/chessdeny" + ChatColor.YELLOW + " to deny.");
-            } else {
-                p.sendMessage(ChatColor.GREEN + "Challenge sent to " + target.getName() + " (" + tc + " min). Expires in 30s.");
-                target.sendMessage(ChatColor.YELLOW + p.getName() + " has challenged you to a " + tc + "m chess game! Type " + ChatColor.AQUA + "/chessaccept " + ChatColor.YELLOW + "to accept or " + ChatColor.RED + "/chessdeny" + ChatColor.YELLOW + " to deny.");
-            }
+            issueChallenge(p, target, minutes, increment, bet, gambit);
             return true;
         }
 
@@ -315,6 +300,109 @@ public class ChessPlugin extends JavaPlugin implements Listener {
 
         @Override
         public List<String> onTabComplete(CommandSender sender, Command command, String alias, String[] args) {
+            return Collections.emptyList();
+        }
+    }
+
+    private class ChessRematchCommand implements TabExecutor {
+        @Override
+        public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
+            if (!(sender instanceof Player)) {
+                sender.sendMessage("Players only.");
+                return true;
+            }
+            Player p = (Player) sender;
+            if (args.length > 3) {
+                p.sendMessage(ChatColor.RED + "Usage: /chessrematch [1|3|5|10[+inc]] [bet] [gambit]");
+                return true;
+            }
+            UUID lastId = getLastOpponent(p.getUniqueId());
+            if (lastId == null) {
+                p.sendMessage(ChatColor.RED + "You haven't played anyone yet.");
+                return true;
+            }
+            Player target = Bukkit.getPlayer(lastId);
+            if (target == null || !target.isOnline()) {
+                String name = Bukkit.getOfflinePlayer(lastId).getName();
+                p.sendMessage(ChatColor.RED + (name != null ? name : "Your last opponent") + " is not online.");
+                return true;
+            }
+            int minutes = 3; // default: blitz
+            int increment = 0;
+            if (args.length >= 1) {
+                String[] parts = args[0].split("\\+");
+                try {
+                    minutes = Integer.parseInt(parts[0]);
+                    if (parts.length > 1) increment = Integer.parseInt(parts[1]);
+                } catch (NumberFormatException ex) {
+                    p.sendMessage(ChatColor.RED + "Invalid time control. Use 1 (bullet), 3 (blitz), 5 (blitz), or 10 (rapid), optionally +inc (e.g. 3+2).");
+                    return true;
+                }
+                if (minutes != 1 && minutes != 3 && minutes != 5 && minutes != 10) {
+                    p.sendMessage(ChatColor.RED + "Invalid time control. Use 1 (bullet), 3 (blitz), 5 (blitz), or 10 (rapid).");
+                    return true;
+                }
+                if (increment < 0 || increment > 60) {
+                    p.sendMessage(ChatColor.RED + "Invalid increment. Use 0-60 seconds.");
+                    return true;
+                }
+            }
+            double bet = 0;
+            boolean gambit = false;
+            if (args.length >= 2) {
+                if (!bettingEnabled()) {
+                    p.sendMessage(ChatColor.RED + "Currency betting is disabled on this server.");
+                    return true;
+                }
+                try {
+                    bet = Double.parseDouble(args[1]);
+                } catch (NumberFormatException ex) {
+                    p.sendMessage(ChatColor.RED + "Invalid bet amount.");
+                    return true;
+                }
+                if (bet <= 0) {
+                    p.sendMessage(ChatColor.RED + "Bet must be a positive number.");
+                    return true;
+                }
+                if (economy == null) {
+                    p.sendMessage(ChatColor.RED + "No Vault or any economy plugin is installed, so bets are unavailable.");
+                    return true;
+                }
+                if (!economy.has(p, bet)) {
+                    p.sendMessage(ChatColor.RED + "You do not have enough money for that bet. Balance: " + economy.format(economy.balance(p)));
+                    return true;
+                }
+            }
+            if (args.length == 3) {
+                if (!bettingEnabled()) {
+                    p.sendMessage(ChatColor.RED + "Currency betting is disabled on this server.");
+                    return true;
+                }
+                gambit = args[2].equalsIgnoreCase("gambit");
+                if (!gambit) {
+                    p.sendMessage(ChatColor.RED + "Invalid option '" + args[2] + "'. Use 'gambit' to enable gambit mode.");
+                    return true;
+                }
+                if (bet <= 0) {
+                    p.sendMessage(ChatColor.RED + "Gambit mode requires a bet.");
+                    return true;
+                }
+            }
+            issueChallenge(p, target, minutes, increment, bet, gambit);
+            return true;
+        }
+
+        @Override
+        public List<String> onTabComplete(CommandSender sender, Command command, String alias, String[] args) {
+            if (args.length == 1) {
+                return Arrays.asList("1", "1+1", "3", "3+2", "5", "5+5", "10");
+            }
+            if (args.length == 2) {
+                return Collections.singletonList("0");
+            }
+            if (args.length == 3) {
+                return Collections.singletonList("gambit");
+            }
             return Collections.emptyList();
         }
     }
@@ -968,6 +1056,37 @@ public class ChessPlugin extends JavaPlugin implements Listener {
         activeGames.remove(g.black.getUniqueId());
     }
 
+    void setLastOpponent(UUID player, UUID opponent) {
+        lastOpponent.put(player, opponent);
+    }
+
+    UUID getLastOpponent(UUID player) {
+        return lastOpponent.get(player);
+    }
+
+    // Shared challenge validation + sending, used by /chess and /chessrematch.
+    void issueChallenge(Player p, Player target, int minutes, int increment, double bet, boolean gambit) {
+        if (target.getUniqueId().equals(p.getUniqueId())) {
+            p.sendMessage(ChatColor.RED + "You cannot challenge yourself.");
+            return;
+        }
+        if (activeGames.containsKey(p.getUniqueId()) || activeGames.containsKey(target.getUniqueId())) {
+            p.sendMessage(ChatColor.RED + "Either you or the target is already in a game.");
+            return;
+        }
+        challengeManager.createChallenge(p, target, minutes, bet, increment, gambit);
+        String tc = minutes + (increment > 0 ? "+" + increment : "");
+        if (bet > 0) {
+            p.sendMessage(ChatColor.GREEN + "Challenge sent to " + target.getName() + " (" + tc + "m, bet " + economy.format(bet) + (gambit ? ", gambit" : "") + "). Expires in 30s.");
+            target.sendMessage(ChatColor.YELLOW + p.getName() + " has challenged you to a " + tc + "m chess game for " + ChatColor.GOLD + economy.format(bet)
+                    + (gambit ? ChatColor.LIGHT_PURPLE + " with gambit mode" : "")
+                    + ChatColor.YELLOW + "! Type " + ChatColor.AQUA + "/chessaccept " + ChatColor.YELLOW + "to accept or " + ChatColor.RED + "/chessdeny" + ChatColor.YELLOW + " to deny.");
+        } else {
+            p.sendMessage(ChatColor.GREEN + "Challenge sent to " + target.getName() + " (" + tc + " min). Expires in 30s.");
+            target.sendMessage(ChatColor.YELLOW + p.getName() + " has challenged you to a " + tc + "m chess game! Type " + ChatColor.AQUA + "/chessaccept " + ChatColor.YELLOW + "to accept or " + ChatColor.RED + "/chessdeny" + ChatColor.YELLOW + " to deny.");
+        }
+    }
+
     // Challenge manager -------------------------------------------------------
 
     static class ChallengeManager {
@@ -1553,6 +1672,10 @@ public class ChessPlugin extends JavaPlugin implements Listener {
             running = true;
             startPosition = board.copy();
             positionKeys.add(positionKey());
+            if (!whiteIsAI && !blackIsAI && !white.getUniqueId().equals(black.getUniqueId())) {
+                plugin.setLastOpponent(white.getUniqueId(), black.getUniqueId());
+                plugin.setLastOpponent(black.getUniqueId(), white.getUniqueId());
+            }
             if (!whiteIsAI) openFor(white);
             if (!blackIsAI) openFor(black);
             timerTask = plugin.getServer().getScheduler().runTaskTimer(plugin, this::tick, 20L, 20L);
