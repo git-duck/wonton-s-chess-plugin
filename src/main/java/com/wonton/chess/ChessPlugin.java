@@ -3129,12 +3129,49 @@ public class ChessPlugin extends JavaPlugin implements Listener {
             QueueEntry(UUID id) { this.id = id; }
         }
 
+        static final String[] FUN_FACTS = {
+                "The longest official chess game lasted 269 moves and ended in a draw.",
+                "The word 'checkmate' comes from the Persian phrase 'shah mat', meaning 'the king is helpless'.",
+                "There are more possible chess games than atoms in the observable universe.",
+                "The first chess computer program was written before a computer existed to run it.",
+                "The queen used to be one of the weakest pieces on the board until the 15th century.",
+                "In medieval Europe, chess was considered one of the seven skills a knight should master.",
+                "The Immortal Game of 1851 is still studied today for its daring queen sacrifice.",
+                "A chessboard has 64 squares, but there are 204 total squares of all sizes on it.",
+                "The knight is the only piece that can move at the start of the game without another piece moving first.",
+                "Bobby Fischer became a grandmaster at 15, the youngest at the time.",
+                "The 'Fool's Mate' is the fastest possible checkmate, in just two moves.",
+                "Chess has been played in outer space, aboard the Soyuz 9 mission in 1970.",
+                "The pieces were originally modeled after an army: infantry, cavalry, elephants, and chariots.",
+                "The longest theoretical checkmate with a king and two knights against a lone king can take up to 33 moves.",
+                "Chess boxing is a real hybrid sport combining rounds of chess and boxing.",
+        };
+
         final ChessPlugin plugin;
         final Map<String, List<QueueEntry>> queue = new ConcurrentHashMap<>();
+        final Random funFactRandom = new Random();
 
         MatchmakingManager(ChessPlugin plugin) {
             this.plugin = plugin;
             plugin.getServer().getScheduler().runTaskTimer(plugin, this::tick, 40L, 40L);
+            // periodically drop a random chess fun fact to everyone currently queueing
+            plugin.getServer().getScheduler().runTaskTimer(plugin, this::sendFunFacts, 600L, 600L);
+        }
+
+        void sendFunFacts() {
+            String fact = FUN_FACTS[funFactRandom.nextInt(FUN_FACTS.length)];
+            Set<UUID> notified = new HashSet<>();
+            for (List<QueueEntry> q : queue.values()) {
+                synchronized (q) {
+                    for (QueueEntry e : q) {
+                        if (!notified.add(e.id)) continue; // don't double-message if somehow in >1 queue
+                        Player p = Bukkit.getPlayer(e.id);
+                        if (p != null && p.isOnline()) {
+                            p.sendMessage(ChatColor.DARK_AQUA + "Chess fact: " + ChatColor.GRAY + fact);
+                        }
+                    }
+                }
+            }
         }
 
         // toggles membership; returns true if the player was added, false if removed
