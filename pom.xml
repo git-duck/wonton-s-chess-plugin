@@ -16,7 +16,7 @@
     <maven.compiler.release>21</maven.compiler.release>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     <project.build.outputTimestamp>2026-08-13T00:00:00Z</project.build.outputTimestamp>
-    <paper.api.version>1.21-R0.1-SNAPSHOT</paper.api.version>
+    <paper.api.version>26.2.build.123-stable</paper.api.version>
   </properties>
 
   <repositories>
