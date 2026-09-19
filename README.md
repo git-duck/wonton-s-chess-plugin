@@ -4,9 +4,7 @@
 [![Release](https://img.shields.io/github/v/release/git-duck/wonton-s-chess-plugin)](https://github.com/git-duck/wonton-s-chess-plugin/releases)
 [![Downloads](https://img.shields.io/github/downloads/git-duck/wonton-s-chess-plugin/total)](https://github.com/git-duck/wonton-s-chess-plugin/releases)
 
-A fully interactive 8x8 Chess engine built natively for Minecraft servers (Paper/Spigot/Bukkit). Instead of using external maps or blocks, games are played entirely inside a custom, split-screen User Interface combining a virtual chest with the player's own inventory.
-
-Current state: actively maintained with recent gameplay, AI, and tooling improvements. Bugs and feature requests are welcome via the issue templates.
+Project is currently inactive, there will likely be no more updates on this repository. I am remaking the plugin with new stuff.
 ## Authors & Credits
 
 * **[wonton_stew](https://github.com/git-duck)** — *Original Creator*
